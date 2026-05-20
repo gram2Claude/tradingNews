@@ -41,16 +41,44 @@ python -m src status                  # счётчики new/analyzed/error
 
 Параметр `--company` опционален: без него обрабатываются все включённые компании.
 
+## Ручной запуск
+
+Один цикл (`fetch → analyze → report`):
+
+```powershell
+python -m src cycle
+```
+
+Или просто двойной клик по **`run.bat`** в корне проекта — он активирует venv,
+запустит `cycle` и оставит окно открытым (`pause`), чтобы было видно вывод.
+
 ## Автозапуск (отключён по умолчанию)
 
-`auto_run: false` в `config.yaml`. Скрипт работает только вручную.
+`auto_run: false` в `config.yaml`. Скрипт работает **только** по ручной команде.
+Никакая задача в Windows Task Scheduler не зарегистрирована — это сделано
+осознанно: пока идёт ручное тестирование пайплайна на 1 источнике (X5 IR),
+автоматизация не нужна.
 
-Когда понадобится включить расписание раз в час через Windows Task Scheduler:
+### Когда понадобится автозапуск раз в час
 
-1. Открой Task Scheduler → **Create Basic Task**
-2. Trigger: **Daily**, повтор каждый **1 час** в течение **24 часов**
-3. Action: **Start a program** → путь к `run.bat` в корне проекта
-4. Settings: «Run whether user is logged on or not» + «Start in: `<project root>`»
+1. Открой **Task Scheduler** (Планировщик заданий) → **Create Basic Task**
+2. **Name:** `trading-news-cycle` (или любое)
+3. **Trigger:** Daily, начало — сегодня, время — любое
+4. После создания: открой задачу → вкладка **Triggers** → **Edit** → **Advanced
+   settings**: поставь галочку **Repeat task every: 1 hour** for a duration of
+   **1 day**
+5. **Action:** Start a program → **Program/script:** полный путь к `run.bat`
+   (например `C:\Users\Oleg\Desktop\Alex\03_claude\06_trading_news\run.bat`)
+6. **Start in (optional):** путь к корню проекта (`C:\Users\...\06_trading_news`)
+7. **Settings:** «Run whether user is logged on or not», «Run with highest
+   privileges» по желанию.
+8. В `config.yaml` обнови `auto_run: true` — это пометка о намерении (на
+   поведение скрипта не влияет, нужна для будущей логики и self-documentation).
+
+### Как выключить
+
+Task Scheduler → найти `trading-news-cycle` → правый клик → **Disable** (или
+**Delete**). В `config.yaml` верни `auto_run: false`.
 
 ## Структура проекта
 
@@ -78,7 +106,10 @@ pytest -q
 
 См. `plans/01_trading_news_aggregator.md`, секция «Этапы»:
 - [x] T1 — Скелет проекта
-- [ ] T2 — Парсер X5 IR
-- [ ] T3 — LLM-анализ + матчинг имён
-- [ ] T4 — Reporter (Excel + Obsidian)
-- [ ] T5 — `run.bat` + документация автозапуска
+- [x] T2 — Парсер X5 IR (через листинг пресс-релизов с пагинацией)
+- [x] T3 — LLM-анализ через GPT-5 mini + матчинг имён через pymorphy3
+- [x] T4 — Reporter: Obsidian MD, persons.csv, data.xlsx, TZ=Europe/Moscow
+- [x] T5 — `run.bat` для ручного запуска + раздел про Task Scheduler выше
+
+**MVP готов.** Расширение источников (Interfax, РБК, Ведомости и т.д.) —
+в отдельной спецификации `specs/02_*.md` после периода обкатки X5.
