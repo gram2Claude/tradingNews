@@ -1,0 +1,1 @@
+- [Workflow: specs & plans](workflow_specs_plans.md) — спеки в /specs, планы в /plans, парные имеют одинаковый числовой префикс

@@ -1,0 +1,78 @@
+# --- Секреты и локальный конфиг ---
+.env
+.env.local
+config.yaml
+
+# --- Данные и сгенерированные артефакты ---
+data/
+output/
+logs/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+ENV/
+
+# Тесты и покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Тип-чекеры и линтеры
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# --- IDE / редакторы ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- ОС ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Jupyter (на всякий случай) ---
+.ipynb_checkpoints/
+
+# --- Локальные SQLite базы / WAL / SHM ---
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# --- Временные файлы reporter.py (tempfile + os.replace) ---
+*.tmp
+~$*.xlsx
