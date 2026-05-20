@@ -23,6 +23,10 @@ def _setup_logging(verbose: bool = False) -> None:
         logging.StreamHandler(sys.stderr),
     ]
     logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
+    # Defense-in-depth: even with -v / DEBUG on the root logger, never let
+    # httpx log request/response headers — they may contain Authorization.
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -54,6 +58,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 def cmd_analyze(args: argparse.Namespace) -> int:
     from src import analyzer
     cfg = load_config(args.config)
+    if not cfg.openai_api_key:
+        print("ERROR: OPENAI_API_KEY is not set in .env — analyze cannot run.", file=sys.stderr)
+        return 2
     r = analyzer.analyze_all(cfg, company_filter=args.company)
     print(
         f"analyzed: {r.analyzed}\n"
@@ -83,6 +90,12 @@ def cmd_cycle(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     log = logging.getLogger(__name__)
     log.info("manual run, auto_run=%s in config", cfg.auto_run)
+
+    # Fail fast: don't fetch new rows we can't analyze, otherwise the user
+    # ends up with status='new' rows and a cryptic traceback at the analyze step.
+    if not cfg.openai_api_key:
+        print("ERROR: OPENAI_API_KEY is not set in .env — cycle aborted before fetch.", file=sys.stderr)
+        return 2
 
     fetch_results = fetcher.fetch_all(cfg, company_filter=args.company)
     analyze_result = analyzer.analyze_all(cfg, company_filter=args.company)

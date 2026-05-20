@@ -44,6 +44,8 @@ log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 MAX_BODY_CHARS = 8000   # truncate runaway bodies before sending to LLM
+MIN_BODY_CHARS = 50     # below this, skip LLM and mark as 'neutral' (not worth tokens)
+LLM_TIMEOUT_S = 60.0    # ceiling per request; SDK default is 10 min — too long
 VALID_MOODS = {"pos", "neutral", "neg"}
 
 SYSTEM_PROMPT = (
@@ -69,7 +71,7 @@ def analyze_all(cfg: Config, company_filter: str | None = None) -> AnalyzeResult
     if not cfg.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set in .env")
 
-    client = OpenAI(api_key=cfg.openai_api_key)
+    client = OpenAI(api_key=cfg.openai_api_key, timeout=LLM_TIMEOUT_S)
     conn = db.connect(cfg.db_path)
     try:
         rows = _select_pending(conn, company_filter)
@@ -135,6 +137,25 @@ def _analyze_one(
     news_id = row["id"]
     start_attempt = int(row["retry_count"] or 0)
 
+    # If body is too short to extract signal, skip the LLM call entirely.
+    # Wasted tokens on a one-line press release don't produce useful mood.
+    if len(body.strip()) < MIN_BODY_CHARS:
+        log.info("analyze: news_id=%d body<%d chars — marking neutral without LLM",
+                 news_id, MIN_BODY_CHARS)
+        matches = matcher.match(headline)
+        conn.execute(
+            "UPDATE news SET status='analyzed', mood='neutral', "
+            "mood_reason='body too short for LLM analysis', "
+            "retry_count=?, tokens_used=0, error_msg=NULL WHERE id=?",
+            (start_attempt, news_id),
+        )
+        for person in matches:
+            conn.execute(
+                "INSERT OR IGNORE INTO news_persons (news_id, person_id) VALUES (?, ?)",
+                (news_id, person.id),
+            )
+        return 0
+
     attempts_used = 0
     try:
         for attempt in Retrying(
@@ -160,13 +181,14 @@ def _analyze_one(
         # Network errors are retriable: only flip to 'error' once we hit MAX_ATTEMPTS.
         terminal = total_attempts >= MAX_ATTEMPTS
         _mark_error(conn, news_id, total_attempts,
-                    f"network: {type(exc).__name__}: {exc}", terminal=terminal)
+                    f"network: {type(exc).__name__}", terminal=terminal)
         raise _Errored(str(exc), total_attempts) from exc
     except APIError as exc:
         # Other API errors (e.g. auth, bad request) are not transient — terminate.
         total_attempts = start_attempt + attempts_used
+        log.warning("analyze: news_id=%d API error: %s", news_id, exc)
         _mark_error(conn, news_id, total_attempts,
-                    f"api: {type(exc).__name__}: {exc}", terminal=True)
+                    f"api: {type(exc).__name__}", terminal=True)
         raise _Errored(str(exc), total_attempts) from exc
 
     # Parse the LLM response
@@ -181,8 +203,9 @@ def _analyze_one(
         # Parse errors are terminal: retrying won't make the LLM return a
         # different shape for the same prompt.
         total_attempts = start_attempt + attempts_used
+        log.warning("analyze: news_id=%d parse error: %s", news_id, exc)
         _mark_error(conn, news_id, total_attempts,
-                    f"parse: {exc}", terminal=True)
+                    f"parse: {type(exc).__name__}", terminal=True)
         raise _Errored(str(exc), total_attempts) from exc
 
     tokens = (response.usage.prompt_tokens + response.usage.completion_tokens) if response.usage else 0

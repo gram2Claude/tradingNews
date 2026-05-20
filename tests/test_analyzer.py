@@ -66,7 +66,7 @@ def _fake_response(content: str, prompt_tokens: int = 100, completion_tokens: in
 def test_happy_path(cfg: Config) -> None:
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    news_id = _seed_news(conn, "Шехтерман объявил план развития", "Подробности в пресс-релизе.")
+    news_id = _seed_news(conn, "Шехтерман объявил план развития", "Подробный пресс-релиз о новых планах компании, описывающий направления развития на ближайшие годы.")
     conn.commit()
     conn.close()
 
@@ -99,7 +99,7 @@ def test_happy_path(cfg: Config) -> None:
 def test_malformed_json_marks_error(cfg: Config) -> None:
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    nid = _seed_news(conn, "Заголовок", "Тело")
+    nid = _seed_news(conn, "Заголовок", "Полный текст пресс-релиза достаточной длины чтобы пройти порог MIN_BODY_CHARS и попасть в LLM-ветку анализа.")
     conn.commit()
     conn.close()
 
@@ -123,7 +123,7 @@ def test_rate_limit_then_success(cfg: Config) -> None:
     from openai import RateLimitError
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    nid = _seed_news(conn, "Заголовок", "Тело")
+    nid = _seed_news(conn, "Заголовок", "Полный текст пресс-релиза достаточной длины чтобы пройти порог MIN_BODY_CHARS и попасть в LLM-ветку анализа.")
     conn.commit()
     conn.close()
 
@@ -148,11 +148,39 @@ def test_rate_limit_then_success(cfg: Config) -> None:
     assert row["retry_count"] == 2
 
 
+def test_short_body_skipped_without_llm_call(cfg: Config) -> None:
+    """Body below MIN_BODY_CHARS → status='analyzed', mood='neutral', no LLM call."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "Шехтерман уволен", "Коротко.")  # well below MIN_BODY_CHARS
+    conn.commit()
+    conn.close()
+
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = AssertionError("LLM must not be called")
+        cls.return_value = client
+        r = analyzer.analyze_all(cfg, "X5")
+
+    assert r.analyzed == 1
+    assert r.tokens_total == 0
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    assert row["status"] == "analyzed"
+    assert row["mood"] == "neutral"
+    # Surname match should still run on the headline.
+    links = conn.execute(
+        "SELECT p.full_name FROM news_persons np JOIN persons p ON p.id=np.person_id "
+        "WHERE np.news_id=?", (nid,)
+    ).fetchall()
+    assert [r["full_name"] for r in links] == ["Игорь Шехтерман"]
+
+
 def test_three_rate_limits_marks_error(cfg: Config) -> None:
     from openai import RateLimitError
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    nid = _seed_news(conn, "Заголовок", "Тело")
+    nid = _seed_news(conn, "Заголовок", "Полный текст пресс-релиза достаточной длины чтобы пройти порог MIN_BODY_CHARS и попасть в LLM-ветку анализа.")
     conn.commit()
     conn.close()
 

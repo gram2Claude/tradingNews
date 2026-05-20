@@ -16,6 +16,10 @@ For each article URL we fetch the detail page and extract:
 
 Listing pages are ordered newest-first; once we find an article with
 ``published_at < since`` we stop pagination.
+
+Transient HTTP errors (5xx, connect/read timeouts) are retried up to three
+times with exponential backoff via tenacity. 404s on pagination remain a
+hard stop (used to detect the end of the listing).
 """
 
 from __future__ import annotations
@@ -25,10 +29,16 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Iterable, Iterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from selectolax.parser import HTMLParser
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from src.sources.base import RawItem, Source
 
@@ -39,6 +49,28 @@ RU_NEWS_PREFIX_RE = re.compile(r"https://www\.x5\.ru/ru/news/[a-z0-9\-]+/")
 MAX_PAGES = 50  # ~600 articles ceiling per fetch cycle
 PAGE_DELAY_S = 0.4
 ARTICLE_DELAY_S = 0.4
+HTTP_TIMEOUT_S = 20.0
+
+
+def _is_transient_http(exc: BaseException) -> bool:
+    """True iff the error looks transient and worth retrying.
+
+    Retries apply to: connect errors, read/write/pool timeouts, generic
+    protocol errors, and 5xx responses. 4xx (including 404) is NOT retried —
+    the listing pagination uses 404 as a hard "end of pages" signal.
+    """
+    if isinstance(exc, (
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.ConnectTimeout,
+        httpx.RemoteProtocolError,
+    )):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 500 <= exc.response.status_code < 600
+    return False
 
 
 class X5IRSource(Source):
@@ -47,15 +79,27 @@ class X5IRSource(Source):
     def __init__(self, base_url: str = "https://www.x5.ru/", **kw) -> None:
         super().__init__(base_url=base_url, **kw)
         self._host = _host(base_url)
+        # Persistent client → reused TLS connection across all requests in
+        # this fetch cycle. Saves ~200ms per article on TLS handshake.
+        self._client = httpx.Client(
+            headers={"User-Agent": self.user_agent},
+            timeout=HTTP_TIMEOUT_S,
+            follow_redirects=True,
+        )
 
     # ---------------------------------------------------------------- public
+
+    def close(self) -> None:
+        self._client.close()
 
     def fetch(self, since: datetime) -> Iterable[RawItem]:
         since_utc = _to_utc(since)
         seen: set[str] = set()
         stop = False
+        last_page = 0
 
         for page in range(1, MAX_PAGES + 1):
+            last_page = page
             page_url = self._page_url(page)
             try:
                 html = self._http_get(page_url)
@@ -95,6 +139,14 @@ class X5IRSource(Source):
                 break
             time.sleep(PAGE_DELAY_S)
 
+        if last_page >= MAX_PAGES and not stop:
+            log.warning(
+                "x5_ir: reached MAX_PAGES=%d without hitting since=%s — "
+                "older news may have been skipped. Bump MAX_PAGES or run "
+                "with a more recent start_date if backfilling.",
+                MAX_PAGES, since_utc.isoformat(),
+            )
+
     # ------------------------------------------------------------- internals
 
     def _page_url(self, n: int) -> str:
@@ -102,11 +154,16 @@ class X5IRSource(Source):
             return urljoin(self._host, LISTING_PATH)
         return urljoin(self._host, f"{LISTING_PATH}page/{n}/")
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=20),
+        retry=retry_if_exception(_is_transient_http),
+        reraise=True,
+    )
     def _http_get(self, url: str) -> str:
-        with httpx.Client(headers={"User-Agent": self.user_agent}, timeout=20, follow_redirects=True) as c:
-            r = c.get(url)
-            r.raise_for_status()
-            return r.text
+        r = self._client.get(url)
+        r.raise_for_status()
+        return r.text
 
     def _fetch_article(self, url: str) -> RawItem:
         html = self._http_get(url)
@@ -133,7 +190,7 @@ def parse_article(url: str, html: str) -> RawItem:
     """Extract headline, body, published_at from one article page."""
     tree = HTMLParser(html)
 
-    headline = _meta(html, "og:title") or ""
+    headline = _meta(tree, "og:title") or ""
     if not headline:
         h1 = tree.css_first("h1")
         headline = h1.text(strip=True) if h1 else ""
@@ -141,7 +198,7 @@ def parse_article(url: str, html: str) -> RawItem:
     if not headline:
         raise ValueError(f"no headline on {url}")
 
-    pub_raw = _meta(html, "article:published_time")
+    pub_raw = _meta(tree, "article:published_time")
     if not pub_raw:
         raise ValueError(f"no article:published_time meta on {url}")
     published_at = _parse_iso(pub_raw)
@@ -162,13 +219,14 @@ def _clean_headline(s: str) -> str:
     return _TRAILING_SITE.sub("", s).strip()
 
 
-def _meta(html: str, prop: str) -> str | None:
-    pattern = re.compile(
-        rf"<meta[^>]+(?:property|name)=[\"']{re.escape(prop)}[\"'][^>]+content=[\"']([^\"']+)[\"']",
-        re.IGNORECASE,
-    )
-    m = pattern.search(html)
-    return m.group(1) if m else None
+def _meta(tree: HTMLParser, prop: str) -> str | None:
+    """Robust meta-tag lookup: walks all <meta> elements and reads attributes
+    independently. Survives any attribute order, unlike regex matching."""
+    for node in tree.css("meta"):
+        attrs = node.attributes
+        if attrs.get("property") == prop or attrs.get("name") == prop:
+            return attrs.get("content")
+    return None
 
 
 def _parse_iso(s: str) -> datetime:
@@ -188,6 +246,5 @@ def _to_utc(dt: datetime) -> datetime:
 
 def _host(base_url: str) -> str:
     # Normalize to https://www.x5.ru regardless of investors path in config.
-    from urllib.parse import urlsplit
     p = urlsplit(base_url)
     return f"{p.scheme}://{p.netloc}"

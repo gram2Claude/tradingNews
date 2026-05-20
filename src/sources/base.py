@@ -27,3 +27,12 @@ class Source(ABC):
     def fetch(self, since: datetime) -> Iterable[RawItem]:
         """Yield items published on/after `since` (UTC). Best-effort newest-first."""
         raise NotImplementedError
+
+    def close(self) -> None:
+        """Release any persistent resources (e.g. HTTP client). Subclasses override."""
+
+    def __enter__(self) -> "Source":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()

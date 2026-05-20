@@ -97,7 +97,17 @@ def _report_company(
     # We do NOT wipe affiliate/ or news_list/ — those are single files we
     # overwrite atomically below.
     if news_dir.exists():
-        shutil.rmtree(news_dir)
+        try:
+            shutil.rmtree(news_dir)
+        except PermissionError as exc:
+            # Obsidian (or any other tool) is holding one of the MD files open.
+            # Log and continue — new files will overwrite existing ones, the
+            # ordinal NN may differ from a clean regen but the data is correct.
+            log.warning(
+                "report: cannot wipe %s — likely held by another process "
+                "(Obsidian?): %s. Continuing without clean-slate; filenames "
+                "may collide with existing ones.", news_dir, exc,
+            )
     news_dir.mkdir(parents=True, exist_ok=True)
     affiliate_dir.mkdir(parents=True, exist_ok=True)
     news_list_dir.mkdir(parents=True, exist_ok=True)

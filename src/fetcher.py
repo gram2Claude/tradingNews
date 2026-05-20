@@ -61,17 +61,22 @@ def fetch_all(cfg: Config, company_filter: str | None = None) -> list[FetchResul
                     log.warning("source %s not in DB — run init-db", src_code)
                     continue
 
-                res = _fetch_one(
-                    conn,
-                    company_id=company_row["id"],
-                    company_name=company_row["name"],
-                    source_id=src_row["id"],
-                    source_code=src_code,
-                    source=cls(base_url=src_cfg.base_url),
-                    since=since,
-                )
+                # Persistent HTTP client lives in the Source; close it
+                # deterministically after the per-source fetch finishes.
+                with cls(base_url=src_cfg.base_url) as source_instance:
+                    res = _fetch_one(
+                        conn,
+                        company_id=company_row["id"],
+                        company_name=company_row["name"],
+                        source_id=src_row["id"],
+                        source_code=src_code,
+                        source=source_instance,
+                        since=since,
+                    )
                 results.append(res)
-        conn.commit()
+                # Commit per source so a crash in source N doesn't lose
+                # rows already fetched from sources 1..N-1.
+                conn.commit()
     finally:
         conn.close()
     return results
