@@ -1,0 +1,63 @@
+global:
+  start_date: 2026-05-01          # тестовая дата начала; меняем после теста
+  llm_provider: openai
+  llm_model: gpt-5-mini
+  output_root: ./output
+  db_path: ./data/db.sqlite
+  auto_run: false                 # автозапуск выключен; запускать через `cycle` вручную
+  timezone: Europe/Moscow         # таймзона для путей файлов и slug-дат
+
+companies:
+  - name: X5
+    start_date: null              # null → берётся global.start_date
+    sources: [x5_ir]              # пока единственный источник на MVP
+    seed_persons: ./seed/x5_persons.csv
+
+sources:
+  x5_ir:
+    name: X5 IR
+    base_url: https://www.x5.ru/ru/investors/
+    parser: x5_ir
+    enabled: true
+
+  # Подключим позже:
+  interfax:
+    name: Interfax
+    base_url: https://www.interfax.ru/
+    parser: interfax
+    enabled: false
+  rbc:
+    name: РБК
+    base_url: https://www.rbc.ru/
+    parser: rbc
+    enabled: false
+  vedomosti:
+    name: Ведомости
+    base_url: https://www.vedomosti.ru/
+    parser: vedomosti
+    enabled: false
+  kommersant:
+    name: Коммерсантъ
+    base_url: https://www.kommersant.ru/
+    parser: kommersant
+    enabled: false
+  e_disclosure:
+    name: e-disclosure
+    base_url: https://www.e-disclosure.ru/
+    parser: e_disclosure
+    enabled: false
+  moex:
+    name: MOEX
+    base_url: https://www.moex.com/
+    parser: moex
+    enabled: false
+  finam:
+    name: Финам
+    base_url: https://www.finam.ru/
+    parser: finam
+    enabled: false
+  forbes:
+    name: Forbes.ru
+    base_url: https://www.forbes.ru/
+    parser: forbes
+    enabled: false
