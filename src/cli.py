@@ -65,16 +65,34 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    logging.getLogger(__name__).info("report is not implemented yet (T4)")
-    print("report: not implemented yet — will be added in T4")
+    from src import reporter
+    cfg = load_config(args.config)
+    results = reporter.report_all(cfg, company_filter=args.company)
+    if not results:
+        print("Nothing to report.")
+        return 0
+    print(f"{'company':<12} {'md':>5} {'persons':>8} {'xlsx_rows':>10} {'xlsx_written':>13}")
+    print("-" * 52)
+    for r in results:
+        print(f"{r.company:<12} {r.md_files:>5} {r.persons_rows:>8} {r.xlsx_rows:>10} {str(r.xlsx_written):>13}")
     return 0
 
 
 def cmd_cycle(args: argparse.Namespace) -> int:
+    from src import analyzer, fetcher, reporter
     cfg = load_config(args.config)
     log = logging.getLogger(__name__)
     log.info("manual run, auto_run=%s in config", cfg.auto_run)
-    print("cycle: not implemented yet — needs T2/T3/T4")
+
+    fetch_results = fetcher.fetch_all(cfg, company_filter=args.company)
+    analyze_result = analyzer.analyze_all(cfg, company_filter=args.company)
+    report_results = reporter.report_all(cfg, company_filter=args.company)
+
+    print(f"fetch:    inserted={sum(r.inserted for r in fetch_results)}")
+    print(f"analyze:  analyzed={analyze_result.analyzed} errored={analyze_result.errored} "
+          f"tokens={analyze_result.tokens_total}")
+    print(f"report:   md={sum(r.md_files for r in report_results)} "
+          f"xlsx_written={all(r.xlsx_written for r in report_results)}")
     return 0
 
 
