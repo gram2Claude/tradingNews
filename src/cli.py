@@ -52,8 +52,15 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    logging.getLogger(__name__).info("analyze is not implemented yet (T3)")
-    print("analyze: not implemented yet — will be added in T3")
+    from src import analyzer
+    cfg = load_config(args.config)
+    r = analyzer.analyze_all(cfg, company_filter=args.company)
+    print(
+        f"analyzed: {r.analyzed}\n"
+        f"errored:  {r.errored}\n"
+        f"skipped (retry_count>=3): {r.skipped_maxed_out}\n"
+        f"tokens:   {r.tokens_total}"
+    )
     return 0
 
 
