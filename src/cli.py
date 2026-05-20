@@ -38,8 +38,16 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
-    logging.getLogger(__name__).info("fetch is not implemented yet (T2)")
-    print("fetch: not implemented yet — will be added in T2")
+    from src import fetcher
+    cfg = load_config(args.config)
+    results = fetcher.fetch_all(cfg, company_filter=args.company)
+    if not results:
+        print("Nothing fetched.")
+        return 0
+    print(f"{'company':<12} {'source':<10} {'fetched':>8} {'inserted':>9} {'errors':>7}")
+    print("-" * 50)
+    for r in results:
+        print(f"{r.company:<12} {r.source:<10} {r.fetched:>8} {r.inserted:>9} {r.errors:>7}")
     return 0
 
 
