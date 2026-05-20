@@ -76,15 +76,24 @@ def _is_transient_http(exc: BaseException) -> bool:
 class X5IRSource(Source):
     code = "x5_ir"
 
+    # If x5.ru ever serves redirects, only follow them when the target stays
+    # on the canonical host. This blocks an SSRF path where a compromised
+    # origin (or a future mistake) could 302 us to 169.254.169.254 or
+    # http://localhost:N. See security/01_*.md → §3.
+    _ALLOWED_REDIRECT_HOSTS = frozenset({"www.x5.ru", "x5.ru"})
+    _MAX_REDIRECTS = 3
+
     def __init__(self, base_url: str = "https://www.x5.ru/", **kw) -> None:
         super().__init__(base_url=base_url, **kw)
         self._host = _host(base_url)
         # Persistent client → reused TLS connection across all requests in
         # this fetch cycle. Saves ~200ms per article on TLS handshake.
+        # follow_redirects=False so we can validate each Location header
+        # before chasing it.
         self._client = httpx.Client(
             headers={"User-Agent": self.user_agent},
             timeout=HTTP_TIMEOUT_S,
-            follow_redirects=True,
+            follow_redirects=False,
         )
 
     # ---------------------------------------------------------------- public
@@ -161,9 +170,31 @@ class X5IRSource(Source):
         reraise=True,
     )
     def _http_get(self, url: str) -> str:
-        r = self._client.get(url)
-        r.raise_for_status()
-        return r.text
+        # Manual redirect-following with host validation. httpx with
+        # follow_redirects=True would chase any Location header — that's
+        # the SSRF vector. We follow at most _MAX_REDIRECTS hops and bail
+        # the moment a Location points outside the x5.ru host set.
+        current = url
+        for _ in range(self._MAX_REDIRECTS + 1):
+            r = self._client.get(current)
+            if r.is_redirect:
+                loc = r.headers.get("location", "")
+                if not loc:
+                    r.raise_for_status()  # malformed redirect → error out
+                target = httpx.URL(loc, base=current)
+                if target.host not in self._ALLOWED_REDIRECT_HOSTS:
+                    raise httpx.HTTPStatusError(
+                        f"refused redirect to non-x5 host: {target.host}",
+                        request=r.request, response=r,
+                    )
+                current = str(target)
+                continue
+            r.raise_for_status()
+            return r.text
+        raise httpx.HTTPStatusError(
+            f"too many redirects (>{self._MAX_REDIRECTS}) starting from {url}",
+            request=r.request, response=r,
+        )
 
     def _fetch_article(self, url: str) -> RawItem:
         html = self._http_get(url)
