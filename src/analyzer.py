@@ -25,7 +25,12 @@ from openai import (
     APIConnectionError,
     APIError,
     APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    NotFoundError,
     OpenAI,
+    PermissionDeniedError,
     RateLimitError,
 )
 from tenacity import (
@@ -48,6 +53,19 @@ MIN_BODY_CHARS = 50     # below this, skip LLM and mark as 'neutral' (not worth 
 LLM_TIMEOUT_S = 60.0    # ceiling per request; SDK default is 10 min — too long
 VALID_MOODS = {"pos", "neutral", "neg"}
 
+# Errors that indicate a global, user-fixable configuration problem (wrong
+# api key, wrong project, wrong model name, malformed request). Marking
+# individual news rows as 'error' on these is a trap: one bad config would
+# poison every fetched row, and after the user fixes the config those rows
+# would stay excluded from _select_pending. Instead we abort the whole batch
+# without touching any row.
+_GLOBAL_CONFIG_ERRORS = (
+    AuthenticationError,
+    PermissionDeniedError,
+    NotFoundError,
+    BadRequestError,
+)
+
 SYSTEM_PROMPT = (
     "Ты аналитик PR-тональности новостей о российских публичных компаниях. "
     "Для каждой новости определи PR-репутационную тональность для компании, о которой идёт речь. "
@@ -65,6 +83,18 @@ class AnalyzeResult:
     errored: int
     skipped_maxed_out: int
     tokens_total: int
+    aborted: bool = False           # True iff batch hit a global config error
+    abort_reason: str | None = None
+
+
+class _GlobalConfigError(Exception):
+    """Raised inside _analyze_one when the OpenAI client returns a global
+    config error (auth, not-found, bad-request, permission). Caught in
+    analyze_all to abort the whole batch without poisoning rows."""
+
+    def __init__(self, msg: str) -> None:
+        super().__init__(msg)
+        self.msg = msg
 
 
 def analyze_all(cfg: Config, company_filter: str | None = None) -> AnalyzeResult:
@@ -95,6 +125,14 @@ def analyze_all(cfg: Config, company_filter: str | None = None) -> AnalyzeResult
                 result.errored += 1
                 log.warning("analyze: news_id=%s ERROR after %d attempts: %s",
                             row["id"], exc.attempts, exc.msg)
+            except _GlobalConfigError as exc:
+                # Don't touch the row — abort the whole batch. Re-running
+                # analyze after the user fixes the config will pick this row
+                # (and all the others behind it) up cleanly.
+                result.aborted = True
+                result.abort_reason = exc.msg
+                log.error("analyze: aborting batch (global config error): %s", exc.msg)
+                break
             conn.commit()  # commit per-row so progress survives crashes
         return result
     finally:
@@ -142,7 +180,9 @@ def _analyze_one(
     if len(body.strip()) < MIN_BODY_CHARS:
         log.info("analyze: news_id=%d body<%d chars — marking neutral without LLM",
                  news_id, MIN_BODY_CHARS)
-        matches = matcher.match(headline)
+        # Match persons against the SAME text the LLM path would have seen
+        # (headline + body). Body may be short but can still mention a person.
+        matches = matcher.match(f"{headline}\n{body}")
         conn.execute(
             "UPDATE news SET status='analyzed', mood='neutral', "
             "mood_reason='body too short for LLM analysis', "
@@ -162,7 +202,7 @@ def _analyze_one(
             stop=stop_after_attempt(MAX_ATTEMPTS - start_attempt),
             wait=wait_exponential(multiplier=2, min=2, max=30),
             retry=retry_if_exception_type(
-                (RateLimitError, APIConnectionError, APITimeoutError)
+                (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
             ),
             reraise=True,
         ):
@@ -176,15 +216,25 @@ def _analyze_one(
                     ],
                     response_format={"type": "json_object"},
                 )
-    except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
+    except (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError) as exc:
         total_attempts = start_attempt + attempts_used
-        # Network errors are retriable: only flip to 'error' once we hit MAX_ATTEMPTS.
-        terminal = total_attempts >= MAX_ATTEMPTS
+        # Transient: stay 'new' so the next analyze run can retry. After 3
+        # in-session attempts we bump retry_count; the loop-level filter in
+        # analyze_all skips rows where retry_count >= MAX_ATTEMPTS until the
+        # user resets them, so we never silently mark them 'error'.
         _mark_error(conn, news_id, total_attempts,
-                    f"network: {type(exc).__name__}", terminal=terminal)
+                    f"transient: {type(exc).__name__}", terminal=False)
         raise _Errored(str(exc), total_attempts) from exc
+    except _GLOBAL_CONFIG_ERRORS as exc:
+        # Global config error — wrong key, model, permissions, malformed
+        # request. Affects EVERY pending row, not just this one. Don't
+        # touch row status; let analyze_all abort the batch and tell the
+        # user to fix the config.
+        log.error("analyze: global config error on news_id=%d: %s: %s",
+                  news_id, type(exc).__name__, exc)
+        raise _GlobalConfigError(f"{type(exc).__name__}: {exc}") from exc
     except APIError as exc:
-        # Other API errors (e.g. auth, bad request) are not transient — terminate.
+        # Other unexpected API errors — terminate this row only.
         total_attempts = start_attempt + attempts_used
         log.warning("analyze: news_id=%d API error: %s", news_id, exc)
         _mark_error(conn, news_id, total_attempts,

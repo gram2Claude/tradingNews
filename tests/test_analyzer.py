@@ -176,7 +176,10 @@ def test_short_body_skipped_without_llm_call(cfg: Config) -> None:
     assert [r["full_name"] for r in links] == ["Игорь Шехтерман"]
 
 
-def test_three_rate_limits_marks_error(cfg: Config) -> None:
+def test_three_rate_limits_keeps_row_new(cfg: Config) -> None:
+    """Transient errors (rate limit / 5xx / timeout) never permanently kill a row.
+    After 3 failed attempts in this session, status stays 'new' and the in-loop
+    retry_count check skips it on future runs until reset."""
     from openai import RateLimitError
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
@@ -196,8 +199,64 @@ def test_three_rate_limits_marks_error(cfg: Config) -> None:
         r = analyzer.analyze_all(cfg, "X5")
 
     assert r.errored == 1
+    assert r.aborted is False
     conn = db.connect(cfg.db_path)
     row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
-    assert row["status"] == "error"
+    # Transient: still 'new' — row can recover next session if user resets retry_count.
+    assert row["status"] == "new"
     assert row["retry_count"] == 3
-    assert "network" in row["error_msg"]
+    assert "transient" in row["error_msg"]
+
+
+def test_auth_error_aborts_batch_without_poisoning_rows(cfg: Config) -> None:
+    """A global config error (wrong API key) must NOT mark any row 'error'.
+    Otherwise fixing the key and rerunning would leave the rows stuck."""
+    from openai import AuthenticationError
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid1 = _seed_news(conn, "Первая новость", "Тело первого пресс-релиза достаточной длины чтобы пройти порог MIN_BODY_CHARS точно.")
+    nid2 = _seed_news(conn, "Вторая новость", "Тело второго пресс-релиза достаточной длины чтобы пройти порог MIN_BODY_CHARS точно.")
+    conn.commit()
+    conn.close()
+
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(401, request=req)
+    err = AuthenticationError("invalid key", response=resp, body=None)
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = err
+        cls.return_value = client
+        r = analyzer.analyze_all(cfg, "X5")
+
+    assert r.aborted is True
+    assert "Authentication" in (r.abort_reason or "")
+    assert r.analyzed == 0
+    assert r.errored == 0
+    conn = db.connect(cfg.db_path)
+    for nid in (nid1, nid2):
+        row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+        assert row["status"] == "new", f"row {nid} got poisoned to {row['status']}"
+
+
+def test_short_body_matches_persons_against_body(cfg: Config) -> None:
+    """Short-body skip must still find persons mentioned only in body."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    # Headline doesn't mention any seed person; body does (short body though).
+    nid = _seed_news(conn, "Новость дня", "Шехтерман.")
+    conn.commit()
+    conn.close()
+
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = AssertionError("LLM must not be called")
+        cls.return_value = client
+        r = analyzer.analyze_all(cfg, "X5")
+
+    assert r.analyzed == 1
+    conn = db.connect(cfg.db_path)
+    links = conn.execute(
+        "SELECT p.full_name FROM news_persons np JOIN persons p ON p.id=np.person_id "
+        "WHERE np.news_id=?", (nid,)
+    ).fetchall()
+    assert [r["full_name"] for r in links] == ["Игорь Шехтерман"]

@@ -68,6 +68,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         f"skipped (retry_count>=3): {r.skipped_maxed_out}\n"
         f"tokens:   {r.tokens_total}"
     )
+    if r.aborted:
+        print(
+            f"\nERROR: batch aborted — {r.abort_reason}\n"
+            "Fix the OpenAI config (api key / model name / permissions) and rerun.",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 
