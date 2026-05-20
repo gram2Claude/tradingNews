@@ -4,7 +4,6 @@ import argparse
 import logging
 import sys
 from datetime import datetime
-from pathlib import Path
 
 from src import db
 from src.config import PROJECT_ROOT, load_config
@@ -18,7 +17,7 @@ def _setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
-    handlers = [
+    handlers: list[logging.Handler] = [
         logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler(sys.stderr),
     ]

@@ -19,7 +19,6 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
 
 from openai import (
     APIConnectionError,
@@ -34,7 +33,6 @@ from openai import (
     RateLimitError,
 )
 from tenacity import (
-    RetryError,
     Retrying,
     retry_if_exception_type,
     stop_after_attempt,
