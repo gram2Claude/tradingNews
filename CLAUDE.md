@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Bootstrapping a new task or project?** Read `WORKFLOW.md` — it describes the
+> 6-phase pipeline (spec → plan → estimate → recon → impl → review → ship),
+> gstack prerequisites, and the artifact naming convention used throughout.
+> Deferred work tracked in `TODOS.md`.
+
 ## Project artifact convention
 
 The user organises planning artifacts in five parallel folders with **matching
@@ -57,6 +62,20 @@ Commands invoked by `/health`. Keep in sync with the "Quality" block above.
 - lint: `python -m ruff check src/ tests/`
 - test: `python -m pytest tests/ -q`
 
+## Ship sequence
+
+Pre-ship gates: `/review` + `/codex review` + `/cso` + `/health` — all PASS.
+Then the user (NOT Claude) runs in their terminal:
+
+```powershell
+git add <specific files, NOT -A without inspection>
+git commit -m @'<russian, lowercase title>'@
+git push -u origin <feature-branch>
+gh pr create  # or via GitHub UI
+# After merge:
+git checkout master && git pull && git branch -d <feature>
+```
+
 Double-click `run.bat` runs `python -m src cycle` with `pause` at the end.
 
 **Auto-run is intentionally OFF** (`auto_run: false` in `config.yaml`). No
@@ -100,6 +119,11 @@ stable.
   within a company.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
   `reporter._write_persons_csv` against `news.mood` and `news.status='analyzed'`.
+- **Keyword filter at fetch stage** (for sources with shared news streams —
+  `rbc` RSS covers all topics): prefilter by strong keywords (aliases +
+  brands) before insertion. Weak-only matches (bare surname) are rejected
+  to avoid homonymy. Implemented in `src/sources/rbc.py:_keyword_match`
+  using pymorphy3 lemmas for Russian, `\b` boundaries for Latin / multi-word.
 
 ### Error handling tiers (analyzer)
 
@@ -117,14 +141,34 @@ stable.
 ### Source abstraction
 
 `src/sources/base.py:Source` is the ABC. New source = subclass `Source`,
-register in `fetcher.SOURCE_REGISTRY`, add an entry to `config.yaml`
-sources. Sources own a persistent `httpx.Client`; `Source.__enter__/__exit__`
-handles teardown.
+register in `fetcher.SOURCE_REGISTRY`, add an entry to `config.yaml.sources`,
+optionally add the code to `companies[X].sources`. Sources own a persistent
+`httpx.Client`; `Source.__enter__/__exit__` handles teardown.
 
-`x5_ir` discovery channel: WordPress press-releases listing
-`/ru/press-center/press-releases/page/N/` (NOT the news sitemap — it lags
-months on x5.ru). Article fields come from meta tags (`og:title`,
-`article:published_time`) and `.content` block.
+**`FetchContext`** (in `base.py`) is passed via `Source.__init__(.., context=)`
+— carries `company_cfg`, `company_id`, `source_id`, `db_path`. Sources that
+need company-specific data (keyword filter, brand / surname lookup) consume
+the context; sources that don't (`x5_ir` — single-company site) ignore it.
+`FetchContext.load_keywords()` returns `Keywords(strong, weak)` where
+strong = aliases + brands, weak = surnames. Matchers should pass on
+strong-only and reject weak-only (avoids surname homonymy — see
+`reviews/02_*_rew.md`).
+
+**Recon before architecture.** Any new source touching an external site
+must first produce `tests/fixtures/<SRC>_RECON.md` documenting endpoint
+URL, response shape, anti-bot behavior, and selectors. The plan for a new
+source is written only after recon — see how `02_rbc_news` pivoted from
+HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
+
+**Sources today:**
+- `x5_ir` — WordPress press-releases at `/ru/press-center/press-releases/page/N/`
+  (sitemap lags months — confirmed unusable). HTML scraper, per-article fetch.
+  Meta tags: `og:title`, `article:published_time`; body: `.content` block.
+- `rbc` — RSS at `rssexport.rbc.ru/rbcnews/news/30/full.rss`. **Main rbc.ru
+  closed by Qrator JS-challenge** (HTTP 401 + `/__qrator/qauth.js` on every
+  page). RSS endpoint lives on a separate subdomain, unprotected, ships the
+  full article text in `<rbc_news:full-text>`. Hard limit: 30 items only
+  (~7 hour window). No backfill possible via RSS.
 
 ### Security guardrails baked in
 
@@ -139,6 +183,20 @@ months on x5.ru). Article fields come from meta tags (`og:title`,
   anywhere in `src/`.
 - `error_msg` stores only the exception class name, not the full message —
   avoids leaking diagnostic detail to disk.
+- **XML parsing uses `defusedxml`**, not stdlib `xml.etree` — protects RSS
+  / XML sources from XXE / billion-laughs / external-DTD attacks (PSF
+  recommendation).
+- **`FeedParseError` (in `rbc.py`) on whole-feed failures** — broken XML,
+  missing `<channel>`, HTML interstitial with 200. Propagates as
+  `errors += 1` in `_fetch_one` so a silently dead source doesn't masquerade
+  as a successful empty fetch.
+- **Keyword filter uses strong/weak split + pymorphy3 lemmatization** —
+  strong terms (aliases, brands) alone pass; weak terms (surnames) alone
+  reject (homonymy defense — `Гусев` from another region doesn't trigger).
+  Russian declensions caught via lemma match (`Пятёрочки`, `Шехтермана`
+  match their nominative form).
+- `.gitattributes` enforces `eol=lf` repo-wide — avoids CRLF warnings on
+  Windows and cross-OS diff noise. `*.bat` keeps CRLF intentionally.
 
 ## Style preferences (learned over the build)
 
