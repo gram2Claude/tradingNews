@@ -1,0 +1,20 @@
+# Normalize line endings: store as LF in the repo, OS-native in working copy.
+# Eliminates the "LF will be replaced by CRLF" warnings on Windows.
+* text=auto eol=lf
+
+# Force LF for source / config / docs so cross-OS diffs stay clean.
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.csv   text eol=lf
+*.txt   text eol=lf
+*.bat   text eol=crlf
+
+# Binary fixtures stay raw.
+*.xlsx  binary
+*.png   binary
+*.jpg   binary
+*.ico   binary

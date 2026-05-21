@@ -8,18 +8,20 @@ The user organises planning artifacts in five parallel folders with **matching
 numeric prefixes** so any task's spec / plan / estimate / reviews / audit can
 be cross-referenced at a glance:
 
-| Folder        | Naming              | Purpose                                           |
-| ------------- | ------------------- | ------------------------------------------------- |
-| `specs/`      | `NN_*.md`           | Task specification (problem, decisions, scope)    |
-| `plans/`      | `NN_*.md`           | Implementation plan with phased acceptance        |
-| `estimates/`  | `NN_*.md`           | Review/critique of the plan before coding         |
-| `reviews/`    | `NN_<model>_*.md`   | Pre-landing code review per AI (claude, codex)    |
-| `security/`   | `NN_*.md`           | CSO audit                                         |
+| Folder        | Naming                          | Purpose                                           |
+| ------------- | ------------------------------- | ------------------------------------------------- |
+| `specs/`      | `NN_<slug>_spec.md`             | Task specification (problem, decisions, scope)    |
+| `plans/`      | `NN_<model>_<slug>_plan.md`     | Implementation plan per AI (claude, codex critiques) |
+| `estimates/`  | `NN_<model>_<slug>_est.md`      | Plan critique/estimate per AI (claude self-review, codex consult) |
+| `reviews/`    | `NN_<model>_<slug>_rew.md`      | Pre-landing code review per AI (claude, codex)    |
+| `security/`   | `NN_<slug>_sec.md`              | CSO audit                                         |
 
-All artifacts for one task share the same `NN`. The user fills in answers
-directly inside spec / estimate / review files (under "Твой ответ:" or
-"Решение:" markers) — don't duplicate the conversation in chat once a file
-exists, edit it in place.
+All artifacts for one task share the same `NN` and the same `<slug>`. The type
+suffix (`_spec`, `_plan`, `_est`, `_rew`, `_sec`) makes the artifact's role
+obvious from the filename alone, so files stay self-describing when moved /
+referenced out of folder context. The user fills in answers directly inside
+spec / estimate / review files (under "Твой ответ:" or "Решение:" markers) —
+don't duplicate the conversation in chat once a file exists, edit it in place.
 
 ## Commands
 
@@ -40,12 +42,20 @@ python -m src cycle    --company X5   # all three above
 python -m src status                  # counts by status per company
 
 # Quality
-pytest tests/ -q                                  # 33 tests, all should pass
+pytest tests/ -q                                  # 59 tests, all should pass
 pytest tests/test_analyzer.py::test_happy_path    # single test
 python -m ruff check src/ tests/                  # lint (auto-fix: --fix)
 python -m mypy src/ --ignore-missing-imports      # types
 python -m coverage run --source=src -m pytest && python -m coverage report
 ```
+
+## Health Stack
+
+Commands invoked by `/health`. Keep in sync with the "Quality" block above.
+
+- typecheck: `python -m mypy src/ --ignore-missing-imports`
+- lint: `python -m ruff check src/ tests/`
+- test: `python -m pytest tests/ -q`
 
 Double-click `run.bat` runs `python -m src cycle` with `pause` at the end.
 

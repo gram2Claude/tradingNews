@@ -4,10 +4,10 @@
 Ветка: `site_news` (коммит `1004065`)
 Модель: Codex CLI 0.130.0, `model_reasoning_effort="high"`
 База сравнения: `master` (полный diff проекта)
-Связанная спека: `specs/01_trading_news_aggregator.md`
-Связанный план: `plans/01_trading_news_aggregator.md`
-Связанная оценка: `estimates/01_trading_news_aggregator.md`
-Параллельное review (Claude): `reviews/01_claude_trading_news_aggregator.md`
+Связанная спека: `specs/01_trading_news_aggregator_spec.md`
+Связанный план: `plans/01_claude_trading_news_aggregator_plan.md`
+Связанная оценка: `estimates/01_claude_trading_news_aggregator_est.md`
+Параллельное review (Claude): `reviews/01_claude_trading_news_aggregator_rew.md`
 
 Итог: **2 issues (1 critical, 1 informational). GATE: FAIL.**
 

@@ -10,8 +10,13 @@ global:
 companies:
   - name: X5
     start_date: null              # null → берётся global.start_date
-    sources: [x5_ir]              # пока единственный источник на MVP
+    sources: [x5_ir]              # rbc добавим в T6.3 после реализации RBCSource
     seed_persons: ./seed/x5_persons.csv
+    aliases:                      # для keyword-фильтра в источниках с поиском / RSS
+      - X5
+      - Х5
+      - X5 Retail Group
+      - X5 Group
 
 sources:
   x5_ir:
@@ -28,7 +33,7 @@ sources:
     enabled: false
   rbc:
     name: РБК
-    base_url: https://www.rbc.ru/
+    base_url: https://rssexport.rbc.ru/   # RSS endpoint; основной сайт закрыт Qrator
     parser: rbc
     enabled: false
   vedomosti:

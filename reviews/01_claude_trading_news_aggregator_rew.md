@@ -2,9 +2,9 @@
 
 Дата: 2026-05-20
 Ветка: `site_news` (коммит `46764e4`)
-Связанная спека: `specs/01_trading_news_aggregator.md`
-Связанный план: `plans/01_trading_news_aggregator.md`
-Связанная оценка: `estimates/01_trading_news_aggregator.md`
+Связанная спека: `specs/01_trading_news_aggregator_spec.md`
+Связанный план: `plans/01_claude_trading_news_aggregator_plan.md`
+Связанная оценка: `estimates/01_claude_trading_news_aggregator_est.md`
 Фокус: обработка ошибок API источников, утечки секретов в логи, тайминги,
 корректность подсчёта тональности при пустом списке новостей, прочие ошибки.
 Итог: **10 issues (4 critical, 6 informational)**
