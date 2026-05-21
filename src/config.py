@@ -18,6 +18,7 @@ class CompanyCfg:
     start_date: str | None
     sources: list[str]
     seed_persons: str | None
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -67,6 +68,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             start_date=c.get("start_date"),
             sources=list(c.get("sources", [])),
             seed_persons=c.get("seed_persons"),
+            aliases=list(c.get("aliases", []) or []),
         )
         for c in raw.get("companies", [])
     ]

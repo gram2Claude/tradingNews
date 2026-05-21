@@ -12,7 +12,8 @@ from datetime import date, datetime, time, timezone
 
 from src import db
 from src.config import Config
-from src.sources.base import RawItem, Source
+from src.sources.base import FetchContext, RawItem, Source
+from src.sources.rbc import RBCSource
 from src.sources.x5_ir import X5IRSource
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ log = logging.getLogger(__name__)
 
 SOURCE_REGISTRY: dict[str, type[Source]] = {
     "x5_ir": X5IRSource,
+    "rbc": RBCSource,
 }
 
 
@@ -61,9 +63,15 @@ def fetch_all(cfg: Config, company_filter: str | None = None) -> list[FetchResul
                     log.warning("source %s not in DB — run init-db", src_code)
                     continue
 
+                context = FetchContext(
+                    company_cfg=company_cfg,
+                    company_id=company_row["id"],
+                    source_id=src_row["id"],
+                    db_path=cfg.db_path,
+                )
                 # Persistent HTTP client lives in the Source; close it
                 # deterministically after the per-source fetch finishes.
-                with cls(base_url=src_cfg.base_url) as source_instance:
+                with cls(base_url=src_cfg.base_url, context=context) as source_instance:
                     res = _fetch_one(
                         conn,
                         company_id=company_row["id"],

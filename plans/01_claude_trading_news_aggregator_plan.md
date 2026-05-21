@@ -1,9 +1,9 @@
 # Plan 01 — Реализация агрегатора торговых новостей
 
-Статус: READY (v2 — учтены правки из `estimates/01_*.md`)
+Статус: READY (v2 — учтены правки из `estimates/01_claude_trading_news_aggregator_est.md`)
 Дата: 2026-05-20
-Связанная спека: `specs/01_trading_news_aggregator.md`
-Связанная оценка: `estimates/01_trading_news_aggregator.md`
+Связанная спека: `specs/01_trading_news_aggregator_spec.md`
+Связанная оценка: `estimates/01_claude_trading_news_aggregator_est.md`
 
 ## Изменения v1 → v2 (на основе estimate)
 
@@ -346,7 +346,7 @@ User-Agent: реальный браузерный. Rate limit: 1 req/сек.
 
 ### T6. (Следующая спека) Расширение источников
 **ВНЕ ЭТОГО ПЛАНА.** После того как T1–T5 отработали неделю и есть доверие к данным
-из X5 IR — заводим `specs/02_*.md` для подключения Interfax/РБК/Ведомостей/etc.
+из X5 IR — заводим `specs/02_rbc_news_spec.md` для подключения Interfax/РБК/Ведомостей/etc.
 Каждый источник = новый файл в `src/sources/` + запись в `config.yaml`.
 
 ---
@@ -394,4 +394,4 @@ User-Agent: реальный браузерный. Rate limit: 1 req/сек.
 Жду твоего ОК на план. Дальше:
 1. Создаю T1 (скелет) — это коммит «chore: project scaffold».
 2. Иду по T2 → T5 последовательно, коммит на каждый этап.
-3. После T5 — пинг тебе на ревью и решаем по `specs/02_*` (расширение источников).
+3. После T5 — пинг тебе на ревью и решаем по `specs/02_rbc_news_spec.md` (расширение источников).

@@ -4,8 +4,8 @@
 Ветка: `site_news` @ `a837070`
 Режим: CSO daily (8/10 confidence gate)
 Аудитор: Claude (Opus 4.7)
-Связанная спека: `specs/01_trading_news_aggregator.md`
-Связанный план: `plans/01_trading_news_aggregator.md`
+Связанная спека: `specs/01_trading_news_aggregator_spec.md`
+Связанный план: `plans/01_claude_trading_news_aggregator_plan.md`
 
 Фокус пользователя:
 - утечка API-ключей (News API, OpenAI, Telegram bot token) в логи или git
