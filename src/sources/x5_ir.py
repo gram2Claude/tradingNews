@@ -24,9 +24,11 @@ hard stop (used to detect the end of the listing).
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import Iterable, Iterator
 from urllib.parse import urljoin, urlsplit
@@ -236,8 +238,30 @@ def parse_article(url: str, html: str) -> RawItem:
 
     body_node = tree.css_first(".content") or tree.css_first("main")
     body = body_node.text(separator="\n", strip=True) if body_node else None
+    body = _clean_text(body) if body else None
 
     return RawItem(url=url, headline=headline, body=body, published_at=published_at)
+
+
+# --------------------------------------------------------- text cleaning
+# Same _clean_text как в finam.py — нормализует NBSP, HTML-сущности и whitespace,
+# чтобы body в БД был стабильным plain-text'ом для LLM.
+_WS_LINE_RE = re.compile(r"[ \t ]+")
+_WS_BLANK_RE = re.compile(r"\n{3,}")
+
+
+def _clean_text(s: str) -> str:
+    if not s:
+        return ""
+    s = html_module.unescape(s)
+    s = s.replace(" ", " ").replace(" ", " ").replace(" ", " ")
+    s = "".join(
+        ch for ch in s if ch == "\n" or ch == "\t" or unicodedata.category(ch)[0] != "C"
+    )
+    lines = [_WS_LINE_RE.sub(" ", line).strip() for line in s.split("\n")]
+    s = "\n".join(lines)
+    s = _WS_BLANK_RE.sub("\n\n", s)
+    return s.strip()
 
 
 # --------------------------------------------------------- small utilities
@@ -247,7 +271,7 @@ _TRAILING_SITE = re.compile(r"\s*-\s*X5\s*$")
 
 
 def _clean_headline(s: str) -> str:
-    return _TRAILING_SITE.sub("", s).strip()
+    return _clean_text(_TRAILING_SITE.sub("", s))
 
 
 def _meta(tree: HTMLParser, prop: str) -> str | None:

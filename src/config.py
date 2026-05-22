@@ -19,6 +19,7 @@ class CompanyCfg:
     sources: list[str]
     seed_persons: str | None
     aliases: list[str] = field(default_factory=list)
+    finam_ticker: str | None = None  # для source 'finam' (MOEX ticker, lowercase); X5 = "x5"
 
 
 @dataclass
@@ -69,6 +70,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             sources=list(c.get("sources", [])),
             seed_persons=c.get("seed_persons"),
             aliases=list(c.get("aliases", []) or []),
+            finam_ticker=c.get("finam_ticker"),
         )
         for c in raw.get("companies", [])
     ]

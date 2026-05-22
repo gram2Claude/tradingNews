@@ -43,6 +43,7 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 def cmd_fetch(args: argparse.Namespace) -> int:
     from src import fetcher
     cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
     results = fetcher.fetch_all(cfg, company_filter=args.company)
     if not results:
         print("Nothing fetched.")
@@ -57,6 +58,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 def cmd_analyze(args: argparse.Namespace) -> int:
     from src import analyzer
     cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
     if not cfg.openai_api_key:
         print("ERROR: OPENAI_API_KEY is not set in .env — analyze cannot run.", file=sys.stderr)
         return 2
@@ -80,6 +82,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     from src import reporter
     cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
     results = reporter.report_all(cfg, company_filter=args.company)
     if not results:
         print("Nothing to report.")
@@ -94,6 +97,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_cycle(args: argparse.Namespace) -> int:
     from src import analyzer, fetcher, reporter
     cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
     log = logging.getLogger(__name__)
     log.info("manual run, auto_run=%s in config", cfg.auto_run)
 

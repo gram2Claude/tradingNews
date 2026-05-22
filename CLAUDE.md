@@ -9,17 +9,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project artifact convention
 
-The user organises planning artifacts in five parallel folders with **matching
-numeric prefixes** so any task's spec / plan / estimate / reviews / audit can
-be cross-referenced at a glance:
+The user organises planning artifacts in five parallel folders under
+**`work_directory/`** with **matching numeric prefixes** so any task's spec /
+plan / estimate / reviews / audit can be cross-referenced at a glance:
 
-| Folder        | Naming                          | Purpose                                           |
-| ------------- | ------------------------------- | ------------------------------------------------- |
-| `specs/`      | `NN_<slug>_spec.md`             | Task specification (problem, decisions, scope)    |
-| `plans/`      | `NN_<model>_<slug>_plan.md`     | Implementation plan per AI (claude, codex critiques) |
-| `estimates/`  | `NN_<model>_<slug>_est.md`      | Plan critique/estimate per AI (claude self-review, codex consult) |
-| `reviews/`    | `NN_<model>_<slug>_rew.md`      | Pre-landing code review per AI (claude, codex)    |
-| `security/`   | `NN_<slug>_sec.md`              | CSO audit                                         |
+| Folder                          | Naming                          | Purpose                                           |
+| ------------------------------- | ------------------------------- | ------------------------------------------------- |
+| `work_directory/01_specs/`         | `NN_<slug>_spec.md`             | Task specification (problem, decisions, scope)    |
+| `work_directory/02_plans/`         | `NN_<model>_<slug>_plan.md`     | Implementation plan per AI (claude, codex critiques) |
+| `work_directory/03_estimates/`     | `NN_<model>_<slug>_est.md`      | Plan critique/estimate per AI (claude self-review, codex consult) |
+| `work_directory/04_reviews/`       | `NN_<model>_<slug>_rew.md`      | Pre-landing code review per AI (claude, codex)    |
+| `work_directory/05_security/`      | `NN_<slug>_sec.md`              | CSO audit                                         |
 
 All artifacts for one task share the same `NN` and the same `<slug>`. The type
 suffix (`_spec`, `_plan`, `_est`, `_rew`, `_sec`) makes the artifact's role
@@ -119,11 +119,13 @@ stable.
   within a company.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
   `reporter._write_persons_csv` against `news.mood` and `news.status='analyzed'`.
-- **Keyword filter at fetch stage** (for sources with shared news streams —
-  `rbc` RSS covers all topics): prefilter by strong keywords (aliases +
-  brands) before insertion. Weak-only matches (bare surname) are rejected
-  to avoid homonymy. Implemented in `src/sources/rbc.py:_keyword_match`
-  using pymorphy3 lemmas for Russian, `\b` boundaries for Latin / multi-word.
+- **Keyword filter at fetch stage** (для shared news streams вроде RSS РБК):
+  prefilter by strong keywords (aliases + brands) before insertion. Weak-only
+  matches (bare surname) are rejected to avoid homonymy. Применяется в `rbc`
+  (сейчас остановлен) через `src/sources/rbc.py:_keyword_match` с pymorphy3
+  для русских declensions. Для finam используется более узкий **slug
+  relevance filter** — анализ ASCII-transliterated slug'а на токены
+  (`pyaterochka`, `iks-5`, `chizhik`) без LLM.
 
 ### Error handling tiers (analyzer)
 
@@ -152,7 +154,7 @@ the context; sources that don't (`x5_ir` — single-company site) ignore it.
 `FetchContext.load_keywords()` returns `Keywords(strong, weak)` where
 strong = aliases + brands, weak = surnames. Matchers should pass on
 strong-only and reject weak-only (avoids surname homonymy — see
-`reviews/02_*_rew.md`).
+`work_directory/04_reviews/02_*_rew.md`).
 
 **Recon before architecture.** Any new source touching an external site
 must first produce `tests/fixtures/<SRC>_RECON.md` documenting endpoint
@@ -161,14 +163,48 @@ source is written only after recon — see how `02_rbc_news` pivoted from
 HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
 
 **Sources today:**
-- `x5_ir` — WordPress press-releases at `/ru/press-center/press-releases/page/N/`
+- `x5_ir` — **активен**. WordPress press-releases at `/ru/press-center/press-releases/page/N/`
   (sitemap lags months — confirmed unusable). HTML scraper, per-article fetch.
-  Meta tags: `og:title`, `article:published_time`; body: `.content` block.
-- `rbc` — RSS at `rssexport.rbc.ru/rbcnews/news/30/full.rss`. **Main rbc.ru
-  closed by Qrator JS-challenge** (HTTP 401 + `/__qrator/qauth.js` on every
-  page). RSS endpoint lives on a separate subdomain, unprotected, ships the
-  full article text in `<rbc_news:full-text>`. Hard limit: 30 items only
-  (~7 hour window). No backfill possible via RSS.
+  Meta tags: `og:title`, `article:published_time`; body: `.content` block,
+  прогнан через `_clean_text`.
+- `finam` — **активен**. `finam.ru/quote/moex/{ticker}/publications/` через
+  Playwright + stealth (`PlaywrightSource`). Listing → URL date filter →
+  slug relevance filter (отсекает broad-market мусор: SpaceX, ETH, золото) →
+  per-article fetch. Headline из `og:title`, published_at из URL pattern
+  `-YYYYMMDD-HHMM/` (meta `article:published_time` finam НЕ ставит).
+  Body: контейнер `[class*="finfin-local-plugin-publication-item-item"]`
+  через selectolax, whitelist по class (`bold font-xl` + `p-margin`) —
+  отбрасывает price ticker, "Купить на демосчёт", AI-инсайты, social footer.
+  См. `tests/fixtures/FINAM_RECON.md`.
+- `rbc` — **временно остановлен** (`config.yaml: enabled: false`). RSS at
+  `rssexport.rbc.ru/rbcnews/news/30/full.rss`. Main rbc.ru закрыт Qrator
+  JS-challenge. Жёсткий лимит 30 items / ~7-часовое окно, backfill через
+  RSS невозможен. Возвращать только под конкретный use-case.
+- `e_disclosure` — **разработка не завершена** (recon в `tests/fixtures/EDISCLOSURE_RECON.md`,
+  план `work_directory/02_plans/03_*`, имплементации `src/sources/e_disclosure.py`
+  пока нет).
+
+### Body cleaning convention
+
+Все парсеры пропускают извлечённый текст (headline и body) через `_clean_text`
+перед возвратом `RawItem` — этот хелпер живёт в каждом source-модуле параллельно
+(`x5_ir._clean_text`, `finam._clean_text`):
+
+- `html.unescape` для `&nbsp;`, `&quot;`, `&mdash;` и пр.
+- замена NBSP / narrow-NBSP / figure-space на обычный пробел
+- удаление control-символов (кроме `\n` и `\t`)
+- сжатие горизонтальных пробелов, не более одной пустой строки подряд
+
+**Чистка обязательна** — без неё в БД залетает HTML / JS / виджет-мусор, токены
+LLM улетают на нерелевантный текст, а LLM начинает «отвлекаться» (видно по mood_reason).
+Для finam критично: до whitelist по class body был ~27 КБ против ~2 КБ реального
+текста. См. `_extract_body` в `src/sources/finam.py` и `parse_article` в
+`src/sources/x5_ir.py`.
+
+**Любой новый source** обязан:
+1. Применять `_clean_text` к headline и body перед `RawItem(...)`.
+2. Если HTML-источник — использовать `selectolax` + whitelist по селекторам
+   (не regex по тегам; regex не справится с виджетами и JS внутри контейнера).
 
 ### Security guardrails baked in
 

@@ -2,7 +2,7 @@
 
 Дата: 2026-05-21
 Метод: curl с реалистичным User-Agent
-Связанный план: `plans/02_claude_rbc_news_plan.md` (v3)
+Связанный план: `work_directory/02_plans/02_claude_rbc_news_plan.md` (v3)
 
 ---
 

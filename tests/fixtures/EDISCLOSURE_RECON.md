@@ -2,7 +2,7 @@
 
 Дата: 2026-05-21
 Метод: curl с реалистичным User-Agent
-Связанный план: `plans/03_*_plan.md` (создаётся после APPROVED)
+Связанный план: `work_directory/02_plans/03_*_plan.md` (создаётся после APPROVED)
 
 ---
 
@@ -171,4 +171,132 @@ Disallow: /Company/Search?*
 - ✅ Подтверждено: robots.txt раскрывает `/api/`, но он за тем же WAF
 - ✅ Подтверждено: Playwright — единственный реалистичный путь для регулярного fetch
 
-Следующий шаг: написать `specs/03_e_disclosure_spec.md` с решением по Playwright-инфраструктуре.
+---
+
+## 6. T7.2 — живой Playwright recon (2026-05-21, ПРОЙДЕН)
+
+### Результаты матрицы (4 режима default Playwright)
+
+Все **FAIL**:
+| Mode | Failure |
+|---|---|
+| chromium headless | `page.goto` timeout 30000ms на `wait_until="networkidle"` — challenge JS зацикливается |
+| chromium headed | то же |
+| firefox headless | warmup_ms=1463, **html=challenge page** (servicepipe не пройден) |
+| firefox headed | то же |
+
+### `playwright-stealth` + chromium headless — PASS (с правильным `wait_until`)
+
+Установлено: `pip install playwright-stealth==2.0.3`. Обёрткой `Stealth().use_sync(sync_playwright())`.
+
+**Критическое открытие:** `wait_until="networkidle"` не работает на e-disclosure из-за долгих XHR'ов (Яндекс.Метрика, реклама). Replace с `wait_until="domcontentloaded"` + явный `time.sleep(5-8)` — работает.
+
+После warmup:
+- `warmup_ms`: ~4000 (chromium+stealth, domcontentloaded + 8s sleep)
+- Cookies: `.AspNetCore.Antiforgery.*`, `PVID`, `VID`, `_ym_*`, `adtech_uid`, `domain_sid` — **servicepipe пропустил, cookies его НЕ установлены** (servicepipe не сработал на главной)
+- HTML: 117KB, title «Интерфакс – Сервер раскрытия информации» (реальная страница)
+- **На последующих page.goto** (через ~5 мин подходов подряд) servicepipe **может включиться** и блокировать — IP throttle. Production 4-часовая cadence далеко за throttle window.
+
+### Альтернативные подходы (deferred)
+
+- **`Stealth + chromium headed`** — не проверено детально (раз stealth headless работает); deferred как fallback
+- **Real Chrome user profile** (`launch_persistent_context`) — deferred, использовать если servicepipe адаптируется к stealth
+- **Firefox + stealth** — не работает (firefox держится за challenge page)
+
+**Production mode:** `chromium headless + playwright-stealth + wait_until="domcontentloaded" + manual sleep`.
+
+### X5 emitter — найден
+
+- **Internal ID:** `39008`
+- **Полное юр. имя:** «ПАО Корпоративный центр ИКС 5»
+- **ИНН:** `7726030449`
+- **ОГРН:** `1027739216757`
+- Company page URL: `https://www.e-disclosure.ru/portal/company.aspx?id=39008`
+
+(Также найден id `9483` = ООО «ИКС 5 ФИНАНС» — финансовая дочка для облигаций, out of scope.)
+
+### Search workflow — НЕ через GET URL, через form submit
+
+URL `/Company/Search?query=...` отдаёт **servicepipe challenge page** (servicepipe selectively включается на этих URL).
+
+**Working search:**
+1. Открыть главную, warmup
+2. Заполнить `input[name="query"]` (видна на главной)
+3. `page.keyboard.press("Enter")` — submit form
+4. Form action: `POST /search/newsfeed`
+5. Results render на той же странице (без redirect)
+6. Извлечь `a[href*="/portal/company.aspx?id="]` — оттуда видим candidate companies
+
+### Listing структура — company page IS the listing
+
+На странице компании (`/portal/company.aspx?id={id}`) видны:
+- **19 последних событий** через `a[href*="/portal/event.aspx?EventId=..."]`
+- В верстке: `<дата> <дата+время> <тип события>` рядом со ссылкой
+- Например:
+  - `13.03.2026 14:52 Проведение заседания совета директоров`
+  - `19.05.2026 10:00 Дата определения лиц, имеющих право на осуществление прав по ценным бумагам`
+  - `23.01.2026 26.01.2026 11:32 Выплаченные доходы`
+- Дополнительно — 7 категорий через `files.aspx?id={id}&type=1..7` (специализированные разрезы; для MVP не используем)
+
+### EventId — НЕ digit-only, base64-ish
+
+Примеры реальных EventId:
+- `YDJnAYBvL0udnyKj1zuduA-B-B`
+- `B-Awjdof2lUu9FhT5NFO5Iw-B-B`
+- `Tnsp9s43JEaegsCU9ppNfA-B-B`
+
+Это **opaque строки** (~24 char alphanumeric с `-`). URL-pattern: `/portal/event.aspx?EventId=<ID>`.
+
+**Важно для плана v3:** `EventId` хранится как часть URL в `news.url` — отдельной колонки `event_id` не нужно.
+
+### Pagination — для X5 в текущем периоде не требуется
+
+На company page видно 19 events. Самое старое из видимых — `23.01.2026`. Это покрывает 4 месяца назад — больше чем backfill с 2026-05-01 (3 недели).
+
+Pagination markers (`page`, `paging`) встречаются в HTML, но **`?page=N` URL pattern не найден** — пагинация скорее всего JS-based / lazy load. Для MVP с backfill с 2026-05-01 это **не критично** — 19 свежих events покрывают наш период с запасом.
+
+**Strategy:** если кому-то понадобится глубокий backfill — отдельная задача с pagination implementation (потенциально через scroll trigger).
+
+### Event page структура
+
+- URL: `/portal/event.aspx?EventId=<ID>`
+- Size: ~74KB
+- `<h2>`: «ПАО Корпоративный центр ИКС 5»
+- Даты: формат `dd.mm.yyyy` (Moscow time, без явного TZ — assumed Europe/Moscow)
+- Body содержит полный текст раскрытия + ссылки на PDF (attachments игнорируем по spec)
+
+### Fixtures сохранены
+
+- `tests/fixtures/edisclosure_listing.html` — company page X5 (89KB)
+- `tests/fixtures/edisclosure_event.html` — одно событие (74KB)
+- `tests/fixtures/ed-company-9483.html` — для сравнения (ООО ИКС 5 Финанс)
+- `tests/fixtures/ed-company-39008.html` — дубликат listing для отдельного теста
+- `tests/fixtures/edisclosure_listing_type1.html` — type=1 категория (для будущего использования)
+- `tests/fixtures/PROBE_RESULTS.md` — лог матрицы
+
+### Acceptance T7.2 — ✅ ПРОЙДЕН
+
+- ✅ Playwright + Chromium + Firefox установлены на Windows
+- ✅ Production mode определён: `chromium headless + playwright-stealth + domcontentloaded`
+- ✅ X5 ID найден: `39008`
+- ✅ ИНН + ОГРН зафиксированы для верификации
+- ✅ Listing URL pattern: `/portal/company.aspx?id={id}` (company page = primary listing)
+- ✅ Event URL pattern: `/portal/event.aspx?EventId=<opaque>`
+- ✅ Селекторы: `a[href*="/portal/event.aspx?EventId="]` для events; дата + тип события в context до 200 символов до/после ссылки
+- ✅ Pagination не нужна для текущего scope (19 events @ company page покрывают backfill с 2026-05-01)
+- ✅ HTML фикстуры сохранены
+- ⚠️ **Servicepipe throttle**: после 5-10 быстрых подходов IP блокируется на 15-60 мин. В production 4-часовая cadence далеко за throttle, но **monitoring challenge solve time в логах обязателен** (P3.2).
+
+### Что изменилось vs план v2
+
+| План v2 предполагал | Реальность из T7.2 |
+|---|---|
+| `LISTING_PATH = "/portal/files.aspx?id={id}&page={page}"` | На самом деле: company.aspx?id={id} — listing на главной компании |
+| `EVENT_PATH = "/portal/event.aspx?EventId={id}"` | Подтверждено |
+| `_goto(url, wait="networkidle")` | **НЕ работает** — нужен `wait="domcontentloaded" + sleep` |
+| `e_disclosure_id` валидация: digit-only | Подтверждено (X5 id=39008) |
+| Pagination через `MAX_PAGES` loop | Для MVP не нужно — 19 events на company page достаточно |
+| servicepipe cookies `spsn`+`spid` обязательны | Под stealth servicepipe **может не сработать** на главной — cookies другие (ASP.NET) |
+| Default Playwright headless | **playwright-stealth обязателен** — без него ни один из 4 default режимов не пробивает |
+
+Эти правки идут в план v3 перед стартом T7.3.
