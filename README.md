@@ -128,3 +128,45 @@ pytest -q
 Body всех активных парсеров проходит через `_clean_text` (snimet HTML-сущности,
 NBSP, control-символы; сжимает whitespace) — в БД попадает чистый plain-text
 без виджет-мусора. Подробности — в `CLAUDE.md` секция «Body cleaning convention».
+
+## Облачное зеркало (Supabase)
+
+Локальная SQLite — source of truth. Поверх неё можно держать **read-only зеркало**
+в Supabase Postgres, чтобы смотреть данные с любого компа через dashboard или
+подключаться сторонними клиентами через REST/SQL.
+
+### Настройка (один раз)
+
+1. В [Supabase dashboard](https://supabase.com/dashboard) → **Settings → Database**:
+   - Раздел **Connection string** → вкладка **Connection pooling**
+   - Mode: **Transaction**, порт **6543**
+   - Скопировать URI (вида
+     `postgresql://postgres.<ref>:[PASSWORD]@aws-<region>.pooler.supabase.com:6543/postgres`)
+   - **Pooler обязателен**: Direct connection (5432) у Supabase IPv6-only,
+     не резолвится с большинства IPv4-сетей.
+2. Открыть `.env`, заменить значение `SUPABASE_DB_URL` на свой URI с подставленным паролем.
+3. Развернуть схему в облако:
+   ```powershell
+   python -m src init-cloud-db
+   ```
+   Создаёт `trading_news.{companies, sources, persons, news, news_persons}` в
+   отдельной схеме (не пересекается с другими таблицами проекта). Idempotent —
+   повторный запуск не падает.
+
+### Использование
+
+- `python -m src cycle` — после успешных fetch/analyze/report **автоматически**
+  пушит данные в Supabase, если `SUPABASE_DB_URL` задан в `.env`. Сетевая ошибка
+  не валит cycle, локальная часть всё равно проходит.
+- `python -m src sync-cloud [--company X5]` — standalone push без fetch/analyze/report.
+
+### Ограничения
+
+- **Это one-way push**, не two-way sync. Если редактируешь строку в Supabase UI,
+  следующий push затрёт изменения. Все правки делай локально и пушь.
+- Пароль БД и connection string хранятся **только в `.env`** (gitignored).
+  Никогда не коммить `.env`. Connection string в логах автоматически маскируется
+  (пароль → `***`).
+- Идентификаторы в облаке — **натуральные ключи** (`companies.name`,
+  `sources.code`, `news.(source_code, url)`), а не суррогатные `id`. Целочисленные
+  id'шки SQLite зависят от порядка вставки и не переносимы между машинами.

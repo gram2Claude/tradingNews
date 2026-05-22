@@ -43,11 +43,15 @@ python -m src init-db              # creates data/db.sqlite + seed persons
 python -m src fetch    --company X5
 python -m src analyze  --company X5
 python -m src report   --company X5
-python -m src cycle    --company X5   # all three above
+python -m src cycle    --company X5   # all three above + cloud push (if SUPABASE_DB_URL set)
 python -m src status                  # counts by status per company
 
+# Cloud mirror (optional, off if SUPABASE_DB_URL absent in .env)
+python -m src init-cloud-db            # apply DDL to Supabase Postgres (idempotent, one-off)
+python -m src sync-cloud --company X5  # standalone push SQLite → Supabase
+
 # Quality
-pytest tests/ -q                                  # 59 tests, all should pass
+pytest tests/ -q                                  # 141 tests, all should pass
 pytest tests/test_analyzer.py::test_happy_path    # single test
 python -m ruff check src/ tests/                  # lint (auto-fix: --fix)
 python -m mypy src/ --ignore-missing-imports      # types
@@ -94,6 +98,8 @@ of truth; everything in `output/` is regenerated from it.
   → fetcher.fetch_all       — walks (company × enabled source), inserts into news
   → analyzer.analyze_all    — picks status='new', calls GPT-5 mini, updates row
   → reporter.report_all     — wipes output/<COMPANY>/news/, regenerates artifacts
+  → cloud_sync.push_all     — UPSERT 4 tables to Supabase, if SUPABASE_DB_URL set
+                              (silent skip if unset; network/db errors logged, exit 0)
 ```
 
 Each stage commits per logical unit (per-source for fetch, per-row for
@@ -119,6 +125,13 @@ stable.
   within a company.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
   `reporter._write_persons_csv` against `news.mood` and `news.status='analyzed'`.
+- **Cloud mirror is opt-in via `SUPABASE_DB_URL` in `.env`**. Absent → `cycle`
+  silently skips push. Present → push runs after reporter; any psycopg/network
+  error is logged at WARNING, cycle exits 0. The cloud copy is one-way,
+  read-only from app side; правки в Supabase UI **затрутся** следующим push'ем.
+  Денормализация: Postgres ключует строки натуральными ключами
+  (`companies.name`, `sources.code`, `news.(source_code, url)`), не суррогатными
+  SQLite `id` — id'шки SQLite drift'ятся между машинами.
 - **Keyword filter at fetch stage** (для shared news streams вроде RSS РБК):
   prefilter by strong keywords (aliases + brands) before insertion. Weak-only
   matches (bare surname) are rejected to avoid homonymy. Применяется в `rbc`
@@ -233,6 +246,76 @@ LLM улетают на нерелевантный текст, а LLM начин
   match their nominative form).
 - `.gitattributes` enforces `eol=lf` repo-wide — avoids CRLF warnings on
   Windows and cross-OS diff noise. `*.bat` keeps CRLF intentionally.
+- **`psycopg` logger pinned to INFO** in `cli._setup_logging` — DEBUG would
+  log parameter values and connection strings (incl. password). All
+  cloud_sync SQL uses `%s` parameterisation; never f-string interpolation.
+- **`SUPABASE_DB_URL` lives only in `.env`** (gitignored). `pusher._mask_db_url`
+  redacts the password before any log line, so masked URL is the only form
+  ever written to stdout/log file.
+
+### Cloud sync (`src/cloud_sync/`)
+
+One-way SQLite → Supabase Postgres mirror. See README → "Облачное зеркало".
+
+- **Schema isolation:** all tables in `trading_news.*` (own Postgres schema),
+  not `public.*` — the Supabase project hosts other workloads (n8n + RAG
+  embeddings) and we mustn't collide with their names like `news`.
+- **Natural keys**: Postgres uses `companies.name`, `sources.code`,
+  `news.(source_code, url)` as primary keys. SQLite surrogate `id`s never
+  cross the boundary — they aren't portable between machines.
+- **Trigger**: invoked from `cmd_cycle` after `reporter.report_all` succeeds,
+  guarded by `if os.environ.get("SUPABASE_DB_URL")`. Exceptions are caught
+  and logged at WARNING, cycle exits 0 — local pipeline is the source of
+  truth, cloud is best-effort.
+- **Standalone**: `python -m src sync-cloud [--company X5]` for off-cycle pushes.
+  Returns non-zero on push failure (unlike the cycle hook).
+- **Connection**: Supabase pooler (port 6543, Transaction mode). Direct
+  connection (5432) is IPv6-only and unusable from typical IPv4 home networks.
+
+## Modules at a glance
+
+`src/` is a flat layout — one file per pipeline stage. Subpackages only where
+plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
+(`text_cleanup`, `name_matcher`, `models`) stay at the top level.
+
+- **`cli.py`** — argparse entrypoint. Subcommands: `init-db`, `fetch`, `analyze`,
+  `report`, `cycle`, `init-cloud-db`, `sync-cloud`, `status`. Owns logging
+  setup (`_setup_logging` — pins `httpx`/`httpcore`/`psycopg` to INFO).
+  `cmd_cycle` wires the whole pipeline + optional cloud push.
+- **`__main__.py`** — `python -m src` entrypoint; defers to `cli.main`.
+- **`config.py`** — `Config`, `CompanyCfg`, `SourceCfg` dataclasses + `load_config()`.
+  Reads `config.yaml` + `.env`. `PROJECT_ROOT` exported here as the canonical
+  filesystem anchor — never hardcode paths elsewhere.
+- **`db.py`** — SQLite schema (`SCHEMA_SQL`), `init_db`, `ensure_migrated`,
+  `connect`. Migration uses `PRAGMA user_version` (currently v2; v1 → v2 added
+  `news.item_type`). `status_counts` lives here.
+- **`models.py`** — `Company`, `Source`, `NewsItem`, `Person` dataclasses
+  (lightweight read models). NOT ORM-mapped; SQLite rows are plain dicts
+  via `sqlite3.Row`.
+- **`fetcher.py`** — orchestrates fetch stage. `SOURCE_REGISTRY` maps source
+  code → class. `fetch_all` walks `(company × enabled source)`, opens each
+  Source as a contextmanager, inserts `RawItem`s with `INSERT OR IGNORE`.
+- **`analyzer.py`** — LLM analysis stage. `SYSTEM_PROMPT` (with
+  prompt-injection guard), `_call_openai` (tenacity-wrapped), `analyze_all`
+  (3-tier error handling — see "Error handling tiers" above).
+- **`name_matcher.py`** — pymorphy3-based surname matching against company
+  seed lists. Runs on `headline + body` after LLM call. Pure function, no
+  state, no network.
+- **`reporter.py`** — generates Obsidian MD + `data.xlsx` + `persons.csv`
+  from SQLite. Wipes `output/<COMPANY>/news/` before regen for deterministic
+  file numbering. Timezone conversion UTC → Europe/Moscow happens here.
+- **`text_cleanup.py`** — `clean_text()` and `sanitize_inline_code()`.
+  Shared utilities for normalising news text downstream of fetch (used by
+  fetcher/analyzer/reporter). **Different from** `_clean_text` inside each
+  source module — those run at extraction time on raw HTML; `text_cleanup`
+  runs on already-cleaned text further down the pipeline.
+- **`sources/`** — one file per news provider (`x5_ir`, `finam`, `rbc`),
+  `base.py` (ABC + `FetchContext` + `RawItem`), `playwright_base.py`
+  (`PlaywrightSource` mixin for Cloudflare/WAF sites — used by finam).
+- **`cloud_sync/`** — `pusher.py` (`push_all`, `init_schema`, `PushStats`,
+  `_mask_db_url`) + `schema.sql` (Postgres DDL for `trading_news.*` schema).
+  Connects via Supabase pooler; reads SQLite read-only, UPSERTs Postgres
+  in one transaction.
 
 ## Style preferences (learned over the build)
 

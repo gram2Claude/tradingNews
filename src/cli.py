@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -26,6 +27,8 @@ def _setup_logging(verbose: bool = False) -> None:
     # httpx log request/response headers — they may contain Authorization.
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.INFO)
+    # psycopg INFO max — protect against connection string / parameter leaks at DEBUG.
+    logging.getLogger("psycopg").setLevel(logging.INFO)
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -116,6 +119,53 @@ def cmd_cycle(args: argparse.Namespace) -> int:
           f"tokens={analyze_result.tokens_total}")
     print(f"report:   md={sum(r.md_files for r in report_results)} "
           f"xlsx_written={all(r.xlsx_written for r in report_results)}")
+
+    # Cloud mirror: silent skip if SUPABASE_DB_URL is not configured.
+    # Network or DB errors are logged but do NOT fail the cycle — the local
+    # pipeline already succeeded and exit code 0 is correct.
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if db_url:
+        try:
+            from src import cloud_sync
+            stats = cloud_sync.push_all(cfg.db_path, db_url, company=args.company)
+            print(f"cloud:    {stats}")
+        except Exception as exc:
+            log.warning("cloud_sync skipped: %s: %s", type(exc).__name__, exc)
+            print(f"cloud:    skipped ({type(exc).__name__})", file=sys.stderr)
+    else:
+        log.debug("cloud_sync: SUPABASE_DB_URL not set, skipping")
+    return 0
+
+
+def cmd_init_cloud_db(args: argparse.Namespace) -> int:
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        print("ERROR: SUPABASE_DB_URL is not set in .env.", file=sys.stderr)
+        return 2
+    from src import cloud_sync
+    try:
+        cloud_sync.init_schema(db_url)
+    except Exception as exc:
+        print(f"ERROR: init-cloud-db failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 3
+    print("Cloud schema applied (trading_news.*).")
+    return 0
+
+
+def cmd_sync_cloud(args: argparse.Namespace) -> int:
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        print("ERROR: SUPABASE_DB_URL is not set in .env.", file=sys.stderr)
+        return 2
+    cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
+    from src import cloud_sync
+    try:
+        stats = cloud_sync.push_all(cfg.db_path, db_url, company=args.company)
+    except Exception as exc:
+        print(f"ERROR: sync-cloud failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 3
+    print(f"cloud push ok: {stats}")
     return 0
 
 
@@ -157,9 +207,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_company_arg(p_rep)
     p_rep.set_defaults(func=cmd_report)
 
-    p_cyc = sub.add_parser("cycle", help="fetch -> analyze -> report")
+    p_cyc = sub.add_parser("cycle", help="fetch -> analyze -> report -> cloud push")
     _add_company_arg(p_cyc)
     p_cyc.set_defaults(func=cmd_cycle)
+
+    p_icd = sub.add_parser("init-cloud-db", help="Apply DDL to Supabase Postgres mirror")
+    p_icd.set_defaults(func=cmd_init_cloud_db)
+
+    p_sc = sub.add_parser("sync-cloud", help="Push local SQLite rows to Supabase")
+    _add_company_arg(p_sc)
+    p_sc.set_defaults(func=cmd_sync_cloud)
 
     p_st = sub.add_parser("status", help="Show news status counts")
     _add_company_arg(p_st)
@@ -169,6 +226,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Load .env early so SUPABASE_DB_URL is visible to commands that don't
+    # call load_config (init-cloud-db). Config-loading commands re-call
+    # load_dotenv internally; it is idempotent.
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+
     parser = build_parser()
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
