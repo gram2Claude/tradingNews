@@ -9,7 +9,7 @@ from src.config import Config, PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS news (
     fetched_at    TEXT DEFAULT CURRENT_TIMESTAMP,
     mood          TEXT,
     mood_reason   TEXT,
+    item_type     TEXT NOT NULL DEFAULT 'news',  -- 'news' | 'recommendation' (v2)
     status        TEXT DEFAULT 'new',
     error_msg     TEXT,
     retry_count   INTEGER DEFAULT 0,
@@ -82,6 +83,14 @@ def init_db(cfg: Config) -> dict[str, int]:
     """
     conn = connect(cfg.db_path)
     try:
+        # Column-presence-aware migration (codex 04 P1.4):
+        # `CREATE TABLE IF NOT EXISTS` не добавляет колонки на существующих таблицах.
+        # Поэтому если v1 БД уже есть, нужен ALTER. Делаем перед executescript чтобы
+        # порядок был детерминированный.
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if user_version < 2:
+            _migrate_to_v2(conn)
+
         conn.executescript(SCHEMA_SQL)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -122,6 +131,46 @@ def init_db(cfg: Config) -> dict[str, int]:
         return counts
     finally:
         conn.close()
+
+
+def ensure_migrated(cfg: Config) -> None:
+    """Lightweight migration check. Called at start of cmd_fetch/analyze/report/cycle
+    so a v1 DB picked up after `git pull` migrates without explicit `init-db`.
+
+    Idempotent: PRAGMA user_version check skips no-op cases in ~1ms. Does NOT
+    re-seed sources/persons (that's `init_db`'s job).
+    """
+    conn = connect(cfg.db_path)
+    try:
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if user_version >= SCHEMA_VERSION:
+            return
+        _migrate_to_v2(conn)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """v1 → v2: add news.item_type if column doesn't exist. Idempotent.
+
+    Если таблица `news` ещё не создана (fresh DB) — выходим, последующий
+    `executescript(SCHEMA_SQL)` создаст её сразу с колонкой item_type.
+    """
+    # Check existence of news table
+    has_news = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news'"
+    ).fetchone()
+    if not has_news:
+        return  # fresh DB; SCHEMA_SQL создаст с item_type сразу
+    # Check existence of item_type column
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(news)")}
+    if "item_type" not in columns:
+        conn.execute(
+            "ALTER TABLE news ADD COLUMN item_type TEXT NOT NULL DEFAULT 'news'"
+        )
+        log.info("db: migrated v1 → v2 (added news.item_type)")
 
 
 def _load_seed_persons(conn: sqlite3.Connection, company_id: int, csv_path: Path) -> None:

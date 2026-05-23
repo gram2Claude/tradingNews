@@ -10,8 +10,9 @@ global:
 companies:
   - name: X5
     start_date: null              # null → берётся global.start_date
-    sources: [x5_ir]              # rbc добавим в T6.3 после реализации RBCSource
+    sources: [x5_ir, rbc, finam]
     seed_persons: ./seed/x5_persons.csv
+    finam_ticker: "x5"            # MOEX ticker, lowercase
     aliases:                      # для keyword-фильтра в источниках с поиском / RSS
       - X5
       - Х5
@@ -67,7 +68,7 @@ sources:
     name: Финам
     base_url: https://www.finam.ru/
     parser: finam
-    enabled: false
+    enabled: true
   forbes:
     name: Forbes.ru
     base_url: https://www.forbes.ru/

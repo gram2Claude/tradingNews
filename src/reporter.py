@@ -2,7 +2,7 @@
 
 For each company we produce, under ``<output_root>/<COMPANY>/``:
 
-* ``news/<YYYY>/<YYYY_MM>/<yyyy_mm_dd>_<slug>_<NN>.md`` — Obsidian-ready
+* ``news/<YYYY>/<YYYY_MM>/<yyyy_mm_dd>_<src>_<slug>_<NN>.md`` — Obsidian-ready
   Markdown with a YAML frontmatter. ``<NN>`` is the 1-based ordinal of the
   article within its publication day.
 * ``affiliate/persons.csv`` — aggregated mood frequencies per seed person.
@@ -20,12 +20,15 @@ log a warning instead of crashing).
 from __future__ import annotations
 
 import csv
+import html as html_module
 import logging
 import os
 import re
 import sqlite3
 import shutil
 import tempfile
+
+from src.text_cleanup import clean_text
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,7 +42,23 @@ from src.config import Config
 
 log = logging.getLogger(__name__)
 
-XLSX_COLUMNS = ["date", "headline", "persons", "mood"]
+XLSX_COLUMNS = ["date", "headline", "persons", "mood", "item_type"]
+
+# Короткие алиасы источников для имени файла. `corp` — официальный сайт компании
+# (источник её собственных пресс-релизов); остальные — 3-буквенные сокращения.
+_SOURCE_SLUG_ALIAS: dict[str, str] = {
+    "x5_ir": "corp",
+    "rbc": "rbc",
+    "finam": "fnm",
+}
+
+
+def _source_slug(source_code: str) -> str:
+    """Алиас для имени файла. Fallback: первые 3 символа кода (lowercase, alnum-only)."""
+    if source_code in _SOURCE_SLUG_ALIAS:
+        return _SOURCE_SLUG_ALIAS[source_code]
+    cleaned = "".join(ch for ch in source_code.lower() if ch.isalnum())
+    return (cleaned[:3] or "src")
 
 
 @dataclass
@@ -89,31 +108,33 @@ def _report_company(
 ) -> ReportResult:
     company_dir = output_root / company_name
     news_dir = company_dir / "news"
+    rec_dir = company_dir / "recommendations"
     affiliate_dir = company_dir / "affiliate"
     news_list_dir = company_dir / "news_list"
 
-    # Idempotency: wipe just the news/ tree so ordinal numbering is stable.
+    # Idempotency: wipe both news/ AND recommendations/ trees so ordinal numbering
+    # is stable AND items reclassified between types don't leave stale orphans.
     # We do NOT wipe affiliate/ or news_list/ — those are single files we
     # overwrite atomically below.
-    if news_dir.exists():
-        try:
-            shutil.rmtree(news_dir)
-        except PermissionError as exc:
-            # Obsidian (or any other tool) is holding one of the MD files open.
-            # Log and continue — new files will overwrite existing ones, the
-            # ordinal NN may differ from a clean regen but the data is correct.
-            log.warning(
-                "report: cannot wipe %s — likely held by another process "
-                "(Obsidian?): %s. Continuing without clean-slate; filenames "
-                "may collide with existing ones.", news_dir, exc,
-            )
+    for d in (news_dir, rec_dir):
+        if d.exists():
+            try:
+                shutil.rmtree(d)
+            except PermissionError as exc:
+                log.warning(
+                    "report: cannot wipe %s — likely held by another process "
+                    "(Obsidian?): %s. Continuing without clean-slate; filenames "
+                    "may collide with existing ones.", d, exc,
+                )
+    # mkdir only news_dir eagerly; recommendations/ created on-demand only if
+    # we have recommendation rows (codex 04 P2.3 — don't create empty folders).
     news_dir.mkdir(parents=True, exist_ok=True)
     affiliate_dir.mkdir(parents=True, exist_ok=True)
     news_list_dir.mkdir(parents=True, exist_ok=True)
 
     rows = list(conn.execute(
         "SELECT n.id, n.url, n.headline, n.body, n.published_at, n.mood, n.mood_reason, "
-        "       s.code AS source_code "
+        "       n.item_type, s.code AS source_code "
         "FROM news n JOIN sources s ON s.id = n.source_id "
         "WHERE n.company_id = ? AND n.status = 'analyzed' "
         "ORDER BY n.published_at ASC, n.id ASC",
@@ -122,14 +143,17 @@ def _report_company(
 
     md_files = 0
     xlsx_rows: list[dict] = []
-    day_counter: dict[str, int] = defaultdict(int)
+    # Day counter scoped per (item_type, day) to avoid ordinal collision between
+    # news/ and recommendations/ folders.
+    day_counter: dict[tuple[str, str], int] = defaultdict(int)
 
     for row in rows:
         pub_utc = _parse_utc(row["published_at"])
         pub_local = pub_utc.astimezone(tz)
         date_key = pub_local.strftime("%Y_%m_%d")
-        day_counter[date_key] += 1
-        nn = day_counter[date_key]
+        item_type = row["item_type"] or "news"
+        day_counter[(item_type, date_key)] += 1
+        nn = day_counter[(item_type, date_key)]
 
         persons = [
             r["full_name"]
@@ -140,24 +164,34 @@ def _report_company(
             )
         ]
 
+        # Defensive cleanup: html.unescape + strip inline JS/CSS. Для уже
+        # хранящихся в БД грязных строк чистит at-read-time; для свежих fetch'ей
+        # (после фикса парсера) — no-op. См. src/text_cleanup.py.
+        headline_clean = html_module.unescape(row["headline"])
+        body_clean = clean_text(row["body"])
+
+        # Route к нужной папке по item_type
+        target_root = rec_dir if item_type == "recommendation" else news_dir
         md_path = _write_md(
-            news_dir, pub_local, nn,
+            target_root, pub_local, nn,
             url=row["url"],
-            headline=row["headline"],
-            body=row["body"] or "",
+            headline=headline_clean,
+            body=body_clean,
             mood=row["mood"],
             mood_reason=row["mood_reason"] or "",
             source_code=row["source_code"],
             persons=persons,
+            item_type=item_type,
         )
         if md_path:
             md_files += 1
 
         xlsx_rows.append({
             "date": pub_local.strftime("%Y_%m_%d"),
-            "headline": row["headline"],
+            "headline": headline_clean,
             "persons": ", ".join(persons),
             "mood": row["mood"],
+            "item_type": item_type,
         })
 
     persons_count = _write_persons_csv(conn, company_id, affiliate_dir / "persons.csv")
@@ -176,7 +210,7 @@ def _report_company(
 
 
 def _write_md(
-    news_dir: Path,
+    root_dir: Path,
     pub_local: datetime,
     nn: int,
     *,
@@ -187,15 +221,20 @@ def _write_md(
     mood_reason: str,
     source_code: str,
     persons: list[str],
+    item_type: str = "news",
 ) -> Path | None:
     year = pub_local.strftime("%Y")
     year_month = pub_local.strftime("%Y_%m")
-    target_dir = news_dir / year / year_month
+    target_dir = root_dir / year / year_month
     target_dir.mkdir(parents=True, exist_ok=True)
 
     date_prefix = pub_local.strftime("%Y_%m_%d")
-    slug = make_slug(headline)
-    filename = f"{date_prefix}_{slug}_{nn:02d}.md"
+    # Имя файла строится из mood_reason (макс 50 символов), что лучше отражает
+    # содержание для пользователя, чем первые слова заголовка. Если mood_reason
+    # пуст — fallback на headline (на случай legacy/edge-case строк).
+    slug = make_slug(mood_reason or headline, max_chars=50)
+    src_slug = _source_slug(source_code)
+    filename = f"{date_prefix}_{src_slug}_{slug}_{nn:02d}.md"
     path = target_dir / filename
 
     frontmatter = _yaml_frontmatter({
@@ -205,6 +244,7 @@ def _write_md(
         "url": url,
         "mood": mood,
         "mood_reason": mood_reason,
+        "item_type": item_type,
         "persons": persons,
     })
 
@@ -287,18 +327,29 @@ def _write_xlsx_atomic(path: Path, rows: list[dict]) -> bool:
 _SLUG_NONWORD = re.compile(r"[^а-яёa-z0-9]+", re.IGNORECASE)
 
 
-def make_slug(headline: str) -> str:
-    """First 5 words of the headline → lowercase Cyrillic/Latin slug.
+def make_slug(text: str, max_chars: int = 60, max_words: int = 5) -> str:
+    """Lowercase Cyrillic/Latin slug из первых ``max_words`` слов.
 
-    Non-alphanumeric runs collapse to a single ``_``. Output is capped at
-    60 chars to keep filesystem entries readable. Cyrillic is preserved
-    — NTFS, ext4 and Obsidian all handle it natively, and Russian slugs
-    stay searchable for the human reader."""
-    words = re.split(r"\s+", headline.strip())[:5]
+    Non-alphanumeric runs collapse to a single ``_``. Output обрезается до
+    ``max_chars`` и аккуратно подрезается до последнего полного слова
+    (исключает «хвостовые» обрезанные токены в имени файла). Cyrillic
+    preserved — NTFS, ext4, Obsidian handle natively.
+
+    HTML-entities (&quot;, &amp;, &#39;, etc) разэскейпиваются перед
+    нарезкой — иначе токен `quot` остаётся в имени файла."""
+    text = html_module.unescape(text)
+    words = re.split(r"\s+", text.strip())[:max_words]
     raw = " ".join(words).lower().replace("ё", "е")
     s = _SLUG_NONWORD.sub("_", raw)
     s = re.sub(r"_+", "_", s).strip("_")
-    return s[:60] or "news"
+    if len(s) > max_chars:
+        cut = s[:max_chars]
+        # Подрезаем до последнего `_` (полного слова), если он есть и не в самом начале
+        last_us = cut.rfind("_")
+        if last_us > max_chars // 2:
+            cut = cut[:last_us]
+        s = cut.strip("_")
+    return s or "news"
 
 
 def _yaml_frontmatter(data: dict) -> str:

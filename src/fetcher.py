@@ -13,8 +13,10 @@ from datetime import date, datetime, time, timezone
 from src import db
 from src.config import Config
 from src.sources.base import FetchContext, RawItem, Source
+from src.sources.finam import FinamSource
 from src.sources.rbc import RBCSource
 from src.sources.x5_ir import X5IRSource
+from src.text_cleanup import clean_text
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 SOURCE_REGISTRY: dict[str, type[Source]] = {
     "x5_ir": X5IRSource,
     "rbc": RBCSource,
+    "finam": FinamSource,
 }
 
 
@@ -142,6 +145,11 @@ def _fetch_one(
 
 
 def _insert(conn: sqlite3.Connection, *, company_id: int, source_id: int, item: RawItem) -> bool:
+    # Чистим headline/body ПЕРЕД записью в БД — это единая точка normalize'а
+    # для всех источников. Снимает HTML-entities (&quot; и т.п.), отрезает
+    # inline JS/CSS-дампы из widget'ов и footer-блоки пресс-релизов. После
+    # этого analyzer и reporter получают уже чистые данные из БД (свои
+    # clean_text-вызовы остаются как defense-in-depth и no-op для свежих fetch'ей).
     cur = conn.execute(
         "INSERT OR IGNORE INTO news "
         "(company_id, source_id, url, headline, body, published_at) "
@@ -150,8 +158,8 @@ def _insert(conn: sqlite3.Connection, *, company_id: int, source_id: int, item: 
             company_id,
             source_id,
             item.url,
-            item.headline,
-            item.body,
+            clean_text(item.headline),
+            clean_text(item.body) if item.body else item.body,
             item.published_at.astimezone(timezone.utc).isoformat(),
         ),
     )

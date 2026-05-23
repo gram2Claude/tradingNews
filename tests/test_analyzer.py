@@ -63,6 +63,139 @@ def _fake_response(content: str, prompt_tokens: int = 100, completion_tokens: in
     )
 
 
+def test_analyze_cleans_body_before_llm_call(cfg: Config) -> None:
+    """В LLM уходит body без HTML-entities и без inline JS/CSS-дампа.
+
+    Defensive layer на случай уже хранящихся в БД «грязных» строк
+    (до фикса парсера). Снижает токены и убирает шум из prompt'а.
+    """
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    real_article = "Реальная новость про X5: " + "длинный текст статьи. " * 30
+    garbage = " .rate:hover { color: #333; } function(){...}"
+    dirty_headline = '&quot;ИКС 5&quot; отчитался'
+    dirty_body = real_article + garbage
+    nid = _seed_news(conn, dirty_headline, dirty_body)
+    conn.commit()
+    conn.close()
+
+    fake = _fake_response(json.dumps({
+        "mood": "pos",
+        "mood_reason": "позитив",
+        "item_type": "news",
+    }))
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.return_value = fake
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    # Проверяем, что именно пошло в LLM
+    call_kwargs = client.chat.completions.create.call_args.kwargs
+    user_msg = call_kwargs["messages"][1]["content"]
+    assert "&quot;" not in user_msg, f"raw entity leaked into LLM input: {user_msg[:200]}"
+    assert ".rate:hover" not in user_msg, "inline CSS leaked into LLM input"
+    assert "function" not in user_msg, "inline JS leaked into LLM input"
+    assert '"ИКС 5"' in user_msg  # entity размотан в реальные кавычки
+    assert "Реальная новость" in user_msg
+    # Запись в БД сохранена
+    conn = db.connect(cfg.db_path)
+    assert conn.execute("SELECT status FROM news WHERE id=?", (nid,)).fetchone()[0] == "analyzed"
+
+
+def test_analyze_extracts_item_type_recommendation(cfg: Config) -> None:
+    """LLM возвращает item_type='recommendation' — записывается в БД."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "AFK Sistema аналитика",
+                     "Брокер X понизил target по акциям AFK Sistema; рекомендация — sell. " * 10)
+    conn.commit()
+    conn.close()
+
+    fake = _fake_response(json.dumps({
+        "mood": "neg",
+        "mood_reason": "негативная оценка",
+        "item_type": "recommendation",
+    }))
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.return_value = fake
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    assert row["status"] == "analyzed"
+    assert row["item_type"] == "recommendation"
+
+
+def test_analyze_defaults_item_type_to_news_if_missing(cfg: Config) -> None:
+    """Если LLM не вернул item_type — fallback to 'news' (backwards-compat)."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "Old-style mock", "Body длиннее MIN_BODY_CHARS чтобы попасть в LLM-ветку. " * 10)
+    conn.commit()
+    conn.close()
+
+    # Old-style mock — без item_type
+    fake = _fake_response(json.dumps({"mood": "pos", "mood_reason": "ok"}))
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.return_value = fake
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    assert row["status"] == "analyzed"
+    assert row["item_type"] == "news"  # default
+
+
+def test_analyze_rejects_invalid_item_type(cfg: Config) -> None:
+    """LLM возвращает невалидное item_type — row → status='error'."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "Bad classifier", "Body длиннее MIN_BODY_CHARS чтобы попасть в LLM-ветку анализа. " * 10)
+    conn.commit()
+    conn.close()
+
+    fake = _fake_response(json.dumps({
+        "mood": "neutral", "mood_reason": "ok",
+        "item_type": "garbage_value",
+    }))
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.return_value = fake
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    assert row["status"] == "error"
+    assert "parse" in (row["error_msg"] or "")
+
+
+def test_short_body_default_item_type_is_news(cfg: Config) -> None:
+    """Short-body skip path: item_type остаётся 'news' (DB default), LLM не вызван."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "Короткая", "Коротко.")  # < MIN_BODY_CHARS
+    conn.commit()
+    conn.close()
+
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = AssertionError("LLM must not be called")
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    assert row["status"] == "analyzed"
+    assert row["mood"] == "neutral"
+    assert row["item_type"] == "news"  # DB default sustained
+
+
 def test_happy_path(cfg: Config) -> None:
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)

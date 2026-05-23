@@ -1,6 +1,6 @@
 # Spec 03 — Источник раскрытий e-disclosure.ru + Playwright инфраструктура
 
-Статус: APPROVED
+Статус: SUPERSEDED (заменён на `specs/04_finam_spec.md` 2026-05-21)
 Дата: 2026-05-21
 Ветка: `e_disclosure_news`
 Зависит от: `specs/01_*_spec.md` (архитектура Source ABC, БД, конфиг)

@@ -9,17 +9,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project artifact convention
 
-The user organises planning artifacts in five parallel folders with **matching
-numeric prefixes** so any task's spec / plan / estimate / reviews / audit can
-be cross-referenced at a glance:
+The user organises planning artifacts in five parallel folders under
+**`work_directory/`** with **matching numeric prefixes** so any task's spec /
+plan / estimate / reviews / audit can be cross-referenced at a glance:
 
-| Folder        | Naming                          | Purpose                                           |
-| ------------- | ------------------------------- | ------------------------------------------------- |
-| `specs/`      | `NN_<slug>_spec.md`             | Task specification (problem, decisions, scope)    |
-| `plans/`      | `NN_<model>_<slug>_plan.md`     | Implementation plan per AI (claude, codex critiques) |
-| `estimates/`  | `NN_<model>_<slug>_est.md`      | Plan critique/estimate per AI (claude self-review, codex consult) |
-| `reviews/`    | `NN_<model>_<slug>_rew.md`      | Pre-landing code review per AI (claude, codex)    |
-| `security/`   | `NN_<slug>_sec.md`              | CSO audit                                         |
+| Folder                          | Naming                          | Purpose                                           |
+| ------------------------------- | ------------------------------- | ------------------------------------------------- |
+| `work_directory/01_specs/`         | `NN_<slug>_spec.md`             | Task specification (problem, decisions, scope)    |
+| `work_directory/02_plans/`         | `NN_<model>_<slug>_plan.md`     | Implementation plan per AI (claude, codex critiques) |
+| `work_directory/03_estimates/`     | `NN_<model>_<slug>_est.md`      | Plan critique/estimate per AI (claude self-review, codex consult) |
+| `work_directory/04_reviews/`       | `NN_<model>_<slug>_rew.md`      | Pre-landing code review per AI (claude, codex)    |
+| `work_directory/05_security/`      | `NN_<slug>_sec.md`              | CSO audit                                         |
 
 All artifacts for one task share the same `NN` and the same `<slug>`. The type
 suffix (`_spec`, `_plan`, `_est`, `_rew`, `_sec`) makes the artifact's role
@@ -43,11 +43,15 @@ python -m src init-db              # creates data/db.sqlite + seed persons
 python -m src fetch    --company X5
 python -m src analyze  --company X5
 python -m src report   --company X5
-python -m src cycle    --company X5   # all three above
+python -m src cycle    --company X5   # all three above + cloud push (if SUPABASE_DB_URL set)
 python -m src status                  # counts by status per company
 
+# Cloud mirror (optional, off if SUPABASE_DB_URL absent in .env)
+python -m src init-cloud-db            # apply DDL to Supabase Postgres (idempotent, one-off)
+python -m src sync-cloud --company X5  # standalone push SQLite → Supabase
+
 # Quality
-pytest tests/ -q                                  # 59 tests, all should pass
+pytest tests/ -q                                  # 141 tests, all should pass
 pytest tests/test_analyzer.py::test_happy_path    # single test
 python -m ruff check src/ tests/                  # lint (auto-fix: --fix)
 python -m mypy src/ --ignore-missing-imports      # types
@@ -94,6 +98,8 @@ of truth; everything in `output/` is regenerated from it.
   → fetcher.fetch_all       — walks (company × enabled source), inserts into news
   → analyzer.analyze_all    — picks status='new', calls GPT-5 mini, updates row
   → reporter.report_all     — wipes output/<COMPANY>/news/, regenerates artifacts
+  → cloud_sync.push_all     — UPSERT 4 tables to Supabase, if SUPABASE_DB_URL set
+                              (silent skip if unset; network/db errors logged, exit 0)
 ```
 
 Each stage commits per logical unit (per-source for fetch, per-row for
@@ -119,11 +125,22 @@ stable.
   within a company.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
   `reporter._write_persons_csv` against `news.mood` and `news.status='analyzed'`.
-- **Keyword filter at fetch stage** (for sources with shared news streams —
-  `rbc` RSS covers all topics): prefilter by strong keywords (aliases +
-  brands) before insertion. Weak-only matches (bare surname) are rejected
-  to avoid homonymy. Implemented in `src/sources/rbc.py:_keyword_match`
-  using pymorphy3 lemmas for Russian, `\b` boundaries for Latin / multi-word.
+- **Cloud mirror is opt-in via `SUPABASE_DB_URL` in `.env`**. Absent → `cycle`
+  silently skips push. Present → push runs after reporter; any psycopg/network
+  error is logged at WARNING, cycle exits 0. The cloud copy is one-way,
+  read-only from app side; push **additive-only** (UPSERT по PK): правки
+  существующих строк в Supabase UI затрутся; удаления в SQLite не удаляют
+  строки в облаке; новые строки, вставленные в Supabase UI, push'ем не трогаются.
+  Денормализация: Postgres ключует строки натуральными ключами
+  (`companies.name`, `sources.code`, `news.(source_code, url)`), не суррогатными
+  SQLite `id` — id'шки SQLite drift'ятся между машинами.
+- **Keyword filter at fetch stage** (для shared news streams вроде RSS РБК):
+  prefilter by strong keywords (aliases + brands) before insertion. Weak-only
+  matches (bare surname) are rejected to avoid homonymy. Применяется в `rbc`
+  (сейчас остановлен) через `src/sources/rbc.py:_keyword_match` с pymorphy3
+  для русских declensions. Для finam используется более узкий **slug
+  relevance filter** — анализ ASCII-transliterated slug'а на токены
+  (`pyaterochka`, `iks-5`, `chizhik`) без LLM.
 
 ### Error handling tiers (analyzer)
 
@@ -152,7 +169,7 @@ the context; sources that don't (`x5_ir` — single-company site) ignore it.
 `FetchContext.load_keywords()` returns `Keywords(strong, weak)` where
 strong = aliases + brands, weak = surnames. Matchers should pass on
 strong-only and reject weak-only (avoids surname homonymy — see
-`reviews/02_*_rew.md`).
+`work_directory/04_reviews/02_*_rew.md`).
 
 **Recon before architecture.** Any new source touching an external site
 must first produce `tests/fixtures/<SRC>_RECON.md` documenting endpoint
@@ -161,14 +178,48 @@ source is written only after recon — see how `02_rbc_news` pivoted from
 HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
 
 **Sources today:**
-- `x5_ir` — WordPress press-releases at `/ru/press-center/press-releases/page/N/`
+- `x5_ir` — **активен**. WordPress press-releases at `/ru/press-center/press-releases/page/N/`
   (sitemap lags months — confirmed unusable). HTML scraper, per-article fetch.
-  Meta tags: `og:title`, `article:published_time`; body: `.content` block.
-- `rbc` — RSS at `rssexport.rbc.ru/rbcnews/news/30/full.rss`. **Main rbc.ru
-  closed by Qrator JS-challenge** (HTTP 401 + `/__qrator/qauth.js` on every
-  page). RSS endpoint lives on a separate subdomain, unprotected, ships the
-  full article text in `<rbc_news:full-text>`. Hard limit: 30 items only
-  (~7 hour window). No backfill possible via RSS.
+  Meta tags: `og:title`, `article:published_time`; body: `.content` block,
+  прогнан через `_clean_text`.
+- `finam` — **активен**. `finam.ru/quote/moex/{ticker}/publications/` через
+  Playwright + stealth (`PlaywrightSource`). Listing → URL date filter →
+  slug relevance filter (отсекает broad-market мусор: SpaceX, ETH, золото) →
+  per-article fetch. Headline из `og:title`, published_at из URL pattern
+  `-YYYYMMDD-HHMM/` (meta `article:published_time` finam НЕ ставит).
+  Body: контейнер `[class*="finfin-local-plugin-publication-item-item"]`
+  через selectolax, whitelist по class (`bold font-xl` + `p-margin`) —
+  отбрасывает price ticker, "Купить на демосчёт", AI-инсайты, social footer.
+  См. `tests/fixtures/FINAM_RECON.md`.
+- `rbc` — **временно остановлен** (`config.yaml: enabled: false`). RSS at
+  `rssexport.rbc.ru/rbcnews/news/30/full.rss`. Main rbc.ru закрыт Qrator
+  JS-challenge. Жёсткий лимит 30 items / ~7-часовое окно, backfill через
+  RSS невозможен. Возвращать только под конкретный use-case.
+- `e_disclosure` — **разработка не завершена** (recon в `tests/fixtures/EDISCLOSURE_RECON.md`,
+  план `work_directory/02_plans/03_*`, имплементации `src/sources/e_disclosure.py`
+  пока нет).
+
+### Body cleaning convention
+
+Все парсеры пропускают извлечённый текст (headline и body) через `_clean_text`
+перед возвратом `RawItem` — этот хелпер живёт в каждом source-модуле параллельно
+(`x5_ir._clean_text`, `finam._clean_text`):
+
+- `html.unescape` для `&nbsp;`, `&quot;`, `&mdash;` и пр.
+- замена NBSP / narrow-NBSP / figure-space на обычный пробел
+- удаление control-символов (кроме `\n` и `\t`)
+- сжатие горизонтальных пробелов, не более одной пустой строки подряд
+
+**Чистка обязательна** — без неё в БД залетает HTML / JS / виджет-мусор, токены
+LLM улетают на нерелевантный текст, а LLM начинает «отвлекаться» (видно по mood_reason).
+Для finam критично: до whitelist по class body был ~27 КБ против ~2 КБ реального
+текста. См. `_extract_body` в `src/sources/finam.py` и `parse_article` в
+`src/sources/x5_ir.py`.
+
+**Любой новый source** обязан:
+1. Применять `_clean_text` к headline и body перед `RawItem(...)`.
+2. Если HTML-источник — использовать `selectolax` + whitelist по селекторам
+   (не regex по тегам; regex не справится с виджетами и JS внутри контейнера).
 
 ### Security guardrails baked in
 
@@ -197,6 +248,76 @@ HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
   match their nominative form).
 - `.gitattributes` enforces `eol=lf` repo-wide — avoids CRLF warnings on
   Windows and cross-OS diff noise. `*.bat` keeps CRLF intentionally.
+- **`psycopg` logger pinned to INFO** in `cli._setup_logging` — DEBUG would
+  log parameter values and connection strings (incl. password). All
+  cloud_sync SQL uses `%s` parameterisation; never f-string interpolation.
+- **`SUPABASE_DB_URL` lives only in `.env`** (gitignored). `pusher._mask_db_url`
+  redacts the password before any log line, so masked URL is the only form
+  ever written to stdout/log file.
+
+### Cloud sync (`src/cloud_sync/`)
+
+One-way SQLite → Supabase Postgres mirror. See README → "Облачное зеркало".
+
+- **Schema isolation:** all tables in `trading_news.*` (own Postgres schema),
+  not `public.*` — the Supabase project hosts other workloads (n8n + RAG
+  embeddings) and we mustn't collide with their names like `news`.
+- **Natural keys**: Postgres uses `companies.name`, `sources.code`,
+  `news.(source_code, url)` as primary keys. SQLite surrogate `id`s never
+  cross the boundary — they aren't portable between machines.
+- **Trigger**: invoked from `cmd_cycle` after `reporter.report_all` succeeds,
+  guarded by `if os.environ.get("SUPABASE_DB_URL")`. Exceptions are caught
+  and logged at WARNING, cycle exits 0 — local pipeline is the source of
+  truth, cloud is best-effort.
+- **Standalone**: `python -m src sync-cloud [--company X5]` for off-cycle pushes.
+  Returns non-zero on push failure (unlike the cycle hook).
+- **Connection**: Supabase pooler (port 6543, Transaction mode). Direct
+  connection (5432) is IPv6-only and unusable from typical IPv4 home networks.
+
+## Modules at a glance
+
+`src/` is a flat layout — one file per pipeline stage. Subpackages only where
+plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
+(`text_cleanup`, `name_matcher`, `models`) stay at the top level.
+
+- **`cli.py`** — argparse entrypoint. Subcommands: `init-db`, `fetch`, `analyze`,
+  `report`, `cycle`, `init-cloud-db`, `sync-cloud`, `status`. Owns logging
+  setup (`_setup_logging` — pins `httpx`/`httpcore`/`psycopg` to INFO).
+  `cmd_cycle` wires the whole pipeline + optional cloud push.
+- **`__main__.py`** — `python -m src` entrypoint; defers to `cli.main`.
+- **`config.py`** — `Config`, `CompanyCfg`, `SourceCfg` dataclasses + `load_config()`.
+  Reads `config.yaml` + `.env`. `PROJECT_ROOT` exported here as the canonical
+  filesystem anchor — never hardcode paths elsewhere.
+- **`db.py`** — SQLite schema (`SCHEMA_SQL`), `init_db`, `ensure_migrated`,
+  `connect`. Migration uses `PRAGMA user_version` (currently v2; v1 → v2 added
+  `news.item_type`). `status_counts` lives here.
+- **`models.py`** — `Company`, `Source`, `NewsItem`, `Person` dataclasses
+  (lightweight read models). NOT ORM-mapped; SQLite rows are plain dicts
+  via `sqlite3.Row`.
+- **`fetcher.py`** — orchestrates fetch stage. `SOURCE_REGISTRY` maps source
+  code → class. `fetch_all` walks `(company × enabled source)`, opens each
+  Source as a contextmanager, inserts `RawItem`s with `INSERT OR IGNORE`.
+- **`analyzer.py`** — LLM analysis stage. `SYSTEM_PROMPT` (with
+  prompt-injection guard), `_call_openai` (tenacity-wrapped), `analyze_all`
+  (3-tier error handling — see "Error handling tiers" above).
+- **`name_matcher.py`** — pymorphy3-based surname matching against company
+  seed lists. Runs on `headline + body` after LLM call. Pure function, no
+  state, no network.
+- **`reporter.py`** — generates Obsidian MD + `data.xlsx` + `persons.csv`
+  from SQLite. Wipes `output/<COMPANY>/news/` before regen for deterministic
+  file numbering. Timezone conversion UTC → Europe/Moscow happens here.
+- **`text_cleanup.py`** — `clean_text()` and `sanitize_inline_code()`.
+  Shared utilities for normalising news text downstream of fetch (used by
+  fetcher/analyzer/reporter). **Different from** `_clean_text` inside each
+  source module — those run at extraction time on raw HTML; `text_cleanup`
+  runs on already-cleaned text further down the pipeline.
+- **`sources/`** — one file per news provider (`x5_ir`, `finam`, `rbc`),
+  `base.py` (ABC + `FetchContext` + `RawItem`), `playwright_base.py`
+  (`PlaywrightSource` mixin for Cloudflare/WAF sites — used by finam).
+- **`cloud_sync/`** — `pusher.py` (`push_all`, `init_schema`, `PushStats`,
+  `_mask_db_url`) + `schema.sql` (Postgres DDL for `trading_news.*` schema).
+  Connects via Supabase pooler; reads SQLite read-only, UPSERTs Postgres
+  in one transaction.
 
 ## Style preferences (learned over the build)
 

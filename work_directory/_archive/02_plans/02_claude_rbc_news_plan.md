@@ -456,5 +456,6 @@ vs v2 (5-9 дней) — экономия 3-6 дней благодаря recon-
 1. `/review` Claude → `reviews/02_claude_rbc_news_rew.md`.
 2. `/codex review` → `reviews/02_codex_rbc_news_rew.md`.
 3. `/cso` → `security/02_rbc_news_sec.md`.
-4. PR `rbc_news → master`.
-5. После merge — спека 03 (Interfax / Ведомости / Коммерсантъ, начиная с recon RSS-feed'ов у каждого).
+4. `/health` — финальный composite dashboard.
+5. PR `rbc_news → master`.
+6. После merge — спека 03 (Interfax / Ведомости / Коммерсантъ, начиная с recon RSS-feed'ов у каждого).

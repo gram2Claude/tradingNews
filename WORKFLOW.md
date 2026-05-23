@@ -75,10 +75,10 @@ ls ~/.claude/skills/gstack/bin/gstack-config 2>/dev/null && echo "GSTACK: instal
 **Если пользователь выбрал B (без gstack):**
 
 - Помни весь workflow ниже, но **заменяй gstack-команды на ручные процедуры**:
-  - `/office-hours` → задавай 5 вопросов сам через AskUserQuestion, сохраняй в `specs/NN_<slug>_spec.md` руками
+  - `/office-hours` → задавай 5 вопросов сам через AskUserQuestion, сохраняй в `work_directory/01_specs/NN_<slug>_spec.md` руками
   - `/review` → читай `git diff`, ищи проблемы по checklist'у в секции «Quality gates» + section 7 правил
   - `/codex review` → если у пользователя установлен `codex` CLI — вызывай `codex review --base master` напрямую через Bash, иначе пропусти и отметь `[codex-unavailable]` в review-файле
-  - `/cso` → пиши security audit вручную по шаблону `security/01_*_sec.md` из этого проекта
+  - `/cso` → пиши security audit вручную по шаблону `work_directory/05_security/01_*_sec.md` из этого проекта
   - `/freeze` → нет аналога; будь особо аккуратен с Edit/Write путями, не выходи за scope задачи
   - `/health` → запускай test/lint/typecheck вручную, считай composite score сам
 - В commit messages / PR body упомяни «(workflow без gstack — некоторые шаги ручные)».
@@ -142,8 +142,10 @@ ls ~/.claude/skills/gstack/bin/gstack-config 2>/dev/null && echo "GSTACK: instal
 После 5 ответов выполни **в указанном порядке**:
 
 ```powershell
-# 1. Создай папки для артефактов (5 параллельных папок + tests/fixtures)
-mkdir specs plans estimates reviews security
+# 1. Создай папки для артефактов (5 параллельных папок внутри work_directory/
+#    + tests/fixtures)
+mkdir work_directory
+mkdir work_directory/01_specs work_directory/02_plans work_directory/03_estimates work_directory/04_reviews work_directory/05_security
 mkdir tests
 mkdir tests/fixtures
 
@@ -191,11 +193,12 @@ Deferred items from reviews. Not blocking current work but tracked.
 
 ```
 <project-root>/
-├── specs/         — что строим, почему, scope, открытые вопросы
-├── plans/         — фазированная реализация с acceptance-критериями
-├── estimates/     — оценки/критика планов (claude self + codex critique)
-├── reviews/       — pre-landing code reviews (claude + codex)
-├── security/      — CSO security audits
+├── work_directory/    — все планировочные артефакты задач (см. ниже)
+│   ├── 01_specs/      — что строим, почему, scope, открытые вопросы
+│   ├── 02_plans/      — фазированная реализация с acceptance-критериями
+│   ├── 03_estimates/  — оценки/критика планов (claude self + codex critique)
+│   ├── 04_reviews/    — pre-landing code reviews (claude + codex)
+│   └── 05_security/   — CSO security audits
 ├── tests/
 │   └── fixtures/  — офлайн-данные для парсер-тестов, RECON-артефакты
 ├── src/           — исходники (Python: src/<pkg>/...)
@@ -221,13 +224,15 @@ Deferred items from reviews. Not blocking current work but tracked.
 **Универсальное правило:** `NN_<slug>_<type>.md` (`<type>` = `spec` / `est` / `sec`),
 либо `NN_<model>_<slug>_<type>.md` (`<type>` = `plan` / `rew`).
 
+Все артефакты складываются под `work_directory/`.
+
 | Папка | Шаблон имени | Кто пишет |
 |---|---|---|
-| `specs/` | `NN_<slug>_spec.md` | Claude (по ответам пользователя через `/office-hours`) |
-| `plans/` | `NN_<model>_<slug>_plan.md` | каждая AI пишет свой план; обычно `claude` основной |
-| `estimates/` | `NN_<model>_<slug>_est.md` | критика плана; `codex` через `/codex consult`, `claude` сам себя |
-| `reviews/` | `NN_<model>_<slug>_rew.md` | pre-landing code review per AI |
-| `security/` | `NN_<slug>_sec.md` | CSO аудит |
+| `work_directory/01_specs/` | `NN_<slug>_spec.md` | Claude (по ответам пользователя через `/office-hours`) |
+| `work_directory/02_plans/` | `NN_<model>_<slug>_plan.md` | каждая AI пишет свой план; обычно `claude` основной |
+| `work_directory/03_estimates/` | `NN_<model>_<slug>_est.md` | критика плана; `codex` через `/codex consult`, `claude` сам себя |
+| `work_directory/04_reviews/` | `NN_<model>_<slug>_rew.md` | pre-landing code review per AI |
+| `work_directory/05_security/` | `NN_<slug>_sec.md` | CSO аудит |
 
 Где:
 - `NN` — двузначный порядковый номер задачи (`01`, `02`, ...). **Общий для всех артефактов одной задачи** — это позволяет cross-reference: spec `02` ↔ plan `02` ↔ estimate `02` ↔ review `02` ↔ security `02`.
@@ -237,12 +242,12 @@ Deferred items from reviews. Not blocking current work but tracked.
 
 **Пример из текущего проекта (задача 02 — РБК):**
 ```
-specs/02_rbc_news_spec.md
-plans/02_claude_rbc_news_plan.md
-estimates/02_codex_rbc_news_est.md
-reviews/02_claude_rbc_news_rew.md
-reviews/02_codex_rbc_news_rew.md
-security/02_rbc_news_sec.md
+work_directory/01_specs/02_rbc_news_spec.md
+work_directory/02_plans/02_claude_rbc_news_plan.md
+work_directory/03_estimates/02_codex_rbc_news_est.md
+work_directory/04_reviews/02_claude_rbc_news_rew.md
+work_directory/04_reviews/02_codex_rbc_news_rew.md
+work_directory/05_security/02_rbc_news_sec.md
 ```
 
 ---
@@ -253,14 +258,14 @@ security/02_rbc_news_sec.md
 
 ### Phase 1 — Понять задачу
 1. **`/office-hours`** — структурированный разбор через 5 forcing-вопросов.
-2. Результат сохрани в `specs/NN_<slug>_spec.md`.
+2. Результат сохрани в `work_directory/01_specs/NN_<slug>_spec.md`.
 3. **Пользователь отвечает в файле** под маркерами `Твой ответ:` или `Решение:`.
 4. Когда все 5 вопросов закрыты — поменяй статус на `APPROVED`.
 
 ### Phase 2 — План
-1. Напиши `plans/NN_claude_<slug>_plan.md` по утверждённой спеке.
+1. Напиши `work_directory/02_plans/NN_claude_<slug>_plan.md` по утверждённой спеке.
    - Структура: контекст, архитектурное место, поток данных, T-фазы с acceptance, риски, оценка времени.
-2. **`/codex consult`** — независимая критика плана → `estimates/NN_codex_<slug>_est.md`.
+2. **`/codex consult`** — независимая критика плана → `work_directory/03_estimates/NN_codex_<slug>_est.md`.
 3. Пользователь отвечает на P1/P2/P3 в estimate-файле (или говорит «accept all P1, по P2/P3 решай сам»).
 4. Если критика серьёзная — план v2 с учётом правок.
 
@@ -284,10 +289,10 @@ security/02_rbc_news_sec.md
 
 ### Phase 5 — Pre-ship gate
 В порядке:
-1. **`/review`** — Claude self-review → `reviews/NN_claude_<slug>_rew.md`. GATE PASS перед следующим шагом.
-2. **`/codex review`** — независимое ревью → `reviews/NN_codex_<slug>_rew.md`. GATE PASS.
+1. **`/review`** — Claude self-review → `work_directory/04_reviews/NN_claude_<slug>_rew.md`. GATE PASS перед следующим шагом.
+2. **`/codex review`** — независимое ревью → `work_directory/04_reviews/NN_codex_<slug>_rew.md`. GATE PASS.
 3. **Fix-first applied:** все P1 закрыты, P2/P3 — fix или defer в `TODOS.md`. Каждый review-файл обновляется секцией Resolution.
-4. **`/cso`** security audit → `security/NN_<slug>_sec.md`. Должно быть `0 CRITICAL, 0 HIGH, 0 MEDIUM` (после 8/10 confidence фильтра).
+4. **`/cso`** security audit → `work_directory/05_security/NN_<slug>_sec.md`. Должно быть `0 CRITICAL, 0 HIGH, 0 MEDIUM` (после 8/10 confidence фильтра).
 5. **`/health`** — финальный диагностический dashboard. Composite score ≥ 9/10.
 
 ### Phase 6 — Ship
@@ -402,8 +407,8 @@ security/02_rbc_news_sec.md
 
 ## 10. Примеры из реальных задач этого проекта
 
-- **Задача 01 (X5 MVP):** 5 фаз стандартно, T1-T5, codex/claude review, security 0 C/H/M. См. артефакты `01_*` во всех 5 папках.
-- **Задача 02 (РБК):** recon (Phase 3) вскрыл что www.rbc.ru закрыт Qrator JS-challenge → pivot плана v1 → v2 → v3 (RSS-only). Экономия 5+ дней работы на неверной архитектуре. См. артефакты `02_*` и особенно `tests/fixtures/RBC_RECON.md`.
+- **Задача 01 (X5 MVP):** 5 фаз стандартно, T1-T5, codex/claude review, security 0 C/H/M. См. артефакты `01_*` во всех 5 папках `work_directory/`.
+- **Задача 02 (РБК):** recon (Phase 3) вскрыл что www.rbc.ru закрыт Qrator JS-challenge → pivot плана v1 → v2 → v3 (RSS-only). Экономия 5+ дней работы на неверной архитектуре. См. артефакты `work_directory/.../02_*` и особенно `tests/fixtures/RBC_RECON.md`.
 
 Эти кейсы — иллюстрация почему **recon до архитектуры** и **codex critique до кода** настолько важны.
 

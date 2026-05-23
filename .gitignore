@@ -76,3 +76,4 @@ Desktop.ini
 # --- Временные файлы reporter.py (tempfile + os.replace) ---
 *.tmp
 ~$*.xlsx
+codex_05_raw.txt

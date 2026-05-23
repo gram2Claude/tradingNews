@@ -9,4 +9,7 @@ pymorphy3>=2.0
 pymorphy3-dicts-ru>=2.4.417150
 tzdata>=2025.1
 defusedxml>=0.7
+psycopg[binary]>=3.2
+playwright>=1.40
+playwright-stealth>=2.0
 pytest>=8.0
