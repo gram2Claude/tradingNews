@@ -28,6 +28,11 @@ referenced out of folder context. The user fills in answers directly inside
 spec / estimate / review files (under "Твой ответ:" or "Решение:" markers) —
 don't duplicate the conversation in chat once a file exists, edit it in place.
 
+**Архив:** задачи, развитие которых остановлено, переезжают в
+`work_directory/_archive/<подпапка>/` с сохранением структуры подпапок и имени
+файла (`_archive/01_specs/02_rbc_news_spec.md` и т.д.). Сейчас в архиве лежат
+артефакты задач `02_rbc_news` и `03_e_disclosure`.
+
 ## Commands
 
 ```powershell
@@ -191,13 +196,15 @@ HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
   через selectolax, whitelist по class (`bold font-xl` + `p-margin`) —
   отбрасывает price ticker, "Купить на демосчёт", AI-инсайты, social footer.
   См. `tests/fixtures/FINAM_RECON.md`.
-- `rbc` — **временно остановлен** (`config.yaml: enabled: false`). RSS at
+- `rbc` — **архивирован** (`config.yaml: enabled: false`, артефакты в
+  `work_directory/_archive/`). Код в `src/sources/rbc.py` оставлен. RSS at
   `rssexport.rbc.ru/rbcnews/news/30/full.rss`. Main rbc.ru закрыт Qrator
   JS-challenge. Жёсткий лимит 30 items / ~7-часовое окно, backfill через
   RSS невозможен. Возвращать только под конкретный use-case.
-- `e_disclosure` — **разработка не завершена** (recon в `tests/fixtures/EDISCLOSURE_RECON.md`,
-  план `work_directory/02_plans/03_*`, имплементации `src/sources/e_disclosure.py`
-  пока нет).
+- `e_disclosure` — **архивирован, имплементации нет** (recon в
+  `tests/fixtures/EDISCLOSURE_RECON.md`, spec/plan в
+  `work_directory/_archive/{01_specs,02_plans,03_estimates}/03_*`,
+  `src/sources/e_disclosure.py` отсутствует).
 
 ### Body cleaning convention
 
