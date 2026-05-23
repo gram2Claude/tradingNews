@@ -50,8 +50,8 @@ _ITEM_URL_RE = re.compile(
 # Finam listing содержит broad-market мусор (SpaceX, ETH, золото) — отсекаем.
 # Slugs Latin-transliterated, word-boundary через "-".
 _FINAM_RELEVANT_SLUG_PARTS = [
-    # X5 direct
-    "x5", "iks-5", "iks5", "korporativnyy-centr-iks",
+    # X5 direct (включая kh5 — Latin BSI/GOST транслитерация Х5; finam её использует)
+    "x5", "kh5", "iks-5", "iks5", "korporativnyy-centr-iks",
     # Пятёрочка (Latin transliteration) + declensions
     "pyaterochka", "pyaterochki", "pyaterochke", "pyaterochku", "pyaterochkoy",
     # Перекрёсток (две транслитерации yo / е) + декл.
@@ -65,7 +65,7 @@ _FINAM_RELEVANT_SLUG_PARTS = [
     # X5 ownership / holdings (AFK Sistema → X5 recommendation case)
     "afk-sistema", "sistema", "sistemy",
     # Retail-sector general keywords
-    "ritejl", "ritail", "prodovolstvenn", "fmcg",
+    "ritejl", "ritail", "riteyl", "prodovolstvenn", "fmcg",
 ]
 
 
@@ -188,7 +188,7 @@ def _extract_body(html: str) -> str:
         cls = (child.attributes or {}).get("class") or ""
         if not any(marker in cls for marker in _FINAM_CONTENT_CLASSES):
             continue
-        text = child.text(separator=" ", strip=True)
+        text = child.text(separator="\n", strip=True)
         if text:
             parts.append(text)
 
@@ -280,11 +280,13 @@ class FinamSource(PlaywrightSource):
             "parse_errors": 0,
         }
         results: list[RawItem] = []
+        rejected_slugs: list[str] = []
 
         # 4. Per-article — фильтр сначала, goto только если все три passed
         for hit in hits:
             if not _slug_relevant(hit.slug):
                 stats["relevance_filtered"] += 1
+                rejected_slugs.append(hit.slug)
                 continue
             if hit.published_at < since:
                 stats["date_filtered"] += 1
@@ -311,4 +313,10 @@ class FinamSource(PlaywrightSource):
                 log.warning("finam: parse error on %s: %s", hit.url, exc)
 
         log.info("finam fetch summary: %s | warmup=%s", stats, warmup)
+        if rejected_slugs:
+            log.info(
+                "finam relevance_filtered slugs (%d): %s",
+                len(rejected_slugs),
+                ", ".join(rejected_slugs),
+            )
         return results
