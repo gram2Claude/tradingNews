@@ -162,8 +162,15 @@ NBSP, control-символы; сжимает whitespace) — в БД попад�
 
 ### Ограничения
 
-- **Это one-way push**, не two-way sync. Если редактируешь строку в Supabase UI,
-  следующий push затрёт изменения. Все правки делай локально и пушь.
+- **Это additive one-way push**, не two-way sync и не полное зеркало.
+  Push делает UPSERT по натуральным ключам:
+  - правки **существующей** строки в Supabase UI → следующий push **затрёт** (UPDATE по конфликту PK);
+  - удаление строки в SQLite → в Supabase она **останется** (никаких DELETE'ов на cloud-стороне);
+  - INSERT новой строки в Supabase UI (с PK, которого нет в SQLite) → push её **не тронет**.
+
+  Практическое следствие: правки делай локально и пушь. Если хочешь чистое
+  зеркало без legacy-строк — пересоздать схему через `init-cloud-db` после
+  ручного `DROP SCHEMA trading_news CASCADE` в Supabase SQL editor.
 - Пароль БД и connection string хранятся **только в `.env`** (gitignored).
   Никогда не коммить `.env`. Connection string в логах автоматически маскируется
   (пароль → `***`).

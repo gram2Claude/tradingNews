@@ -128,7 +128,9 @@ stable.
 - **Cloud mirror is opt-in via `SUPABASE_DB_URL` in `.env`**. Absent → `cycle`
   silently skips push. Present → push runs after reporter; any psycopg/network
   error is logged at WARNING, cycle exits 0. The cloud copy is one-way,
-  read-only from app side; правки в Supabase UI **затрутся** следующим push'ем.
+  read-only from app side; push **additive-only** (UPSERT по PK): правки
+  существующих строк в Supabase UI затрутся; удаления в SQLite не удаляют
+  строки в облаке; новые строки, вставленные в Supabase UI, push'ем не трогаются.
   Денормализация: Postgres ключует строки натуральными ключами
   (`companies.name`, `sources.code`, `news.(source_code, url)`), не суррогатными
   SQLite `id` — id'шки SQLite drift'ятся между машинами.
