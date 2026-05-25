@@ -56,7 +56,7 @@ python -m src init-cloud-db            # apply DDL to Supabase Postgres (idempot
 python -m src sync-cloud --company X5  # standalone push SQLite → Supabase
 
 # Quality
-pytest tests/ -q                                  # 141 tests, all should pass
+pytest tests/ -q                                  # 178 tests, all should pass
 pytest tests/test_analyzer.py::test_happy_path    # single test
 python -m ruff check src/ tests/                  # lint (auto-fix: --fix)
 python -m mypy src/ --ignore-missing-imports      # types
@@ -100,18 +100,23 @@ of truth; everything in `output/` is regenerated from it.
 
 ```
 [Task Scheduler / manual] → cli.py → cmd_cycle
-  → fetcher.fetch_all       — walks (company × enabled source), inserts into news
-  → analyzer.analyze_all    — picks status='new', calls GPT-5 mini, updates row
-  → reporter.report_all     — wipes output/<COMPANY>/news/, regenerates artifacts
-  → cloud_sync.push_all     — UPSERT 4 tables to Supabase, if SUPABASE_DB_URL set
-                              (silent skip if unset; network/db errors logged, exit 0)
+  → fetcher.fetch_all       — walks (company × enabled source), dispatches RawItems
+                              into `news` ИЛИ `recommendations` по Source.item_destination
+  → analyzer.analyze_all    — два прохода (news, потом recommendations),
+                              два SYSTEM_PROMPT'а, два error-marker'а
+  → reporter.report_all     — wipes output/<COMPANY>/{news,recommendations}/,
+                              регенерирует UNION-ом из обеих таблиц
+  → cloud_sync.push_all     — UPSERT 7 tables to Supabase в строгом порядке
+                              (companies → sources → persons → news →
+                               recommendations → news_persons → recommendation_persons),
+                              if SUPABASE_DB_URL set
 ```
 
 Each stage commits per logical unit (per-source for fetch, per-row for
 analyze, per-company for report). Re-running any stage is idempotent —
-`UNIQUE(source_id, url)` dedups news; `status` machine prevents double
-analysis; reporter wipes `news/` tree before regen so file numbering is
-stable.
+`UNIQUE(source_id, url)` dedups news и recommendations отдельно; `status`
+machine prevents double analysis; reporter wipes `news/` И `recommendations/`
+trees перед regen so file numbering is stable.
 
 ### Key invariants
 
@@ -127,9 +132,22 @@ stable.
 - **Persons matching uses pymorphy3 lemmas of surnames.** Seed list lives in
   `seed/x5_persons.csv`; LLM does not extract persons — `name_matcher` runs
   on `headline + body` after the LLM call. Surnames are assumed unique
-  within a company.
+  within a company. Связь хранится в **двух junction-таблицах**:
+  `news_persons` (для news) и `recommendation_persons` (для recommendations) —
+  analyzer диспатчит INSERT по тому, какой path обрабатывается.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
-  `reporter._write_persons_csv` against `news.mood` and `news.status='analyzed'`.
+  `reporter._write_persons_csv` через CTE `all_mentions` (UNION над обоими
+  junction-источниками) против `mood` analyzed-строк.
+- **News vs recommendations — две отдельные таблицы (v3, задача 06).**
+  `news` — пресс-релизы (x5_ir) и смешанная лента (finam, item_type='news'|'recommendation').
+  `recommendations` — отдельная таблица со структурными полями (`target_price`,
+  `recommendation_action`, `potential_pct`, `multipliers_json`); туда пишут
+  только recommendation-only источники (lmsic, задача 07).
+- **`Source.item_destination` enum** управляет диспатчем в `fetcher._insert`:
+  `NEWS` (default — x5_ir/finam/rbc) или `RECOMMENDATIONS` (lmsic).
+  finam **сознательно** оставлен на `NEWS` со смешанным `item_type` —
+  это γ-стратегия из spec 06 (см. `TODOS.md → δ-completion` про устранение
+  дуального read-path в будущем).
 - **Cloud mirror is opt-in via `SUPABASE_DB_URL` in `.env`**. Absent → `cycle`
   silently skips push. Present → push runs after reporter; any psycopg/network
   error is logged at WARNING, cycle exits 0. The cloud copy is one-way,
@@ -270,8 +288,10 @@ One-way SQLite → Supabase Postgres mirror. See README → "Облачное з
   not `public.*` — the Supabase project hosts other workloads (n8n + RAG
   embeddings) and we mustn't collide with their names like `news`.
 - **Natural keys**: Postgres uses `companies.name`, `sources.code`,
-  `news.(source_code, url)` as primary keys. SQLite surrogate `id`s never
-  cross the boundary — they aren't portable between machines.
+  `news.(source_code, url)`, `recommendations.(source_code, url)` as primary
+  keys. Junction-таблицы используют composite PK
+  `(source_code, url, company_name, person_full_name)`. SQLite surrogate
+  `id`s never cross the boundary — they aren't portable between machines.
 - **Trigger**: invoked from `cmd_cycle` after `reporter.report_all` succeeds,
   guarded by `if os.environ.get("SUPABASE_DB_URL")`. Exceptions are caught
   and logged at WARNING, cycle exits 0 — local pipeline is the source of
@@ -296,23 +316,40 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   Reads `config.yaml` + `.env`. `PROJECT_ROOT` exported here as the canonical
   filesystem anchor — never hardcode paths elsewhere.
 - **`db.py`** — SQLite schema (`SCHEMA_SQL`), `init_db`, `ensure_migrated`,
-  `connect`. Migration uses `PRAGMA user_version` (currently v2; v1 → v2 added
-  `news.item_type`). `status_counts` lives here.
-- **`models.py`** — `Company`, `Source`, `NewsItem`, `Person` dataclasses
-  (lightweight read models). NOT ORM-mapped; SQLite rows are plain dicts
-  via `sqlite3.Row`.
+  `connect`. Migration uses `PRAGMA user_version` (currently **v3**; v1→v2
+  added `news.item_type`; v2→v3 добавил таблицы `recommendations` +
+  `recommendation_persons`). `_migrate_to_v3` транзакционная через
+  `SAVEPOINT v3_migration` — `with conn:` не работает для DDL в Python
+  sqlite3 legacy mode. `status_counts` возвращает UNION над обеими таблицами
+  с колонкой `kind`.
+- **`models.py`** — `Company`, `Source`, `NewsItem`, `Recommendation`, `Person`
+  dataclasses (lightweight read models). NOT ORM-mapped; SQLite rows are
+  plain dicts via `sqlite3.Row`.
 - **`fetcher.py`** — orchestrates fetch stage. `SOURCE_REGISTRY` maps source
   code → class. `fetch_all` walks `(company × enabled source)`, opens each
-  Source as a contextmanager, inserts `RawItem`s with `INSERT OR IGNORE`.
-- **`analyzer.py`** — LLM analysis stage. `SYSTEM_PROMPT` (with
-  prompt-injection guard), `_call_openai` (tenacity-wrapped), `analyze_all`
-  (3-tier error handling — see "Error handling tiers" above).
+  Source as a contextmanager. `_insert` — dispatcher по `source.item_destination`,
+  два helper'а `_insert_into_news` / `_insert_into_recommendations`
+  с `INSERT OR IGNORE`.
+- **`analyzer.py`** — LLM analysis stage. Два независимых path'а:
+  `_analyze_news` (с `SYSTEM_PROMPT_NEWS`, парсит item_type, UPDATE news +
+  INSERT news_persons) и `_analyze_recommendation` (с `SYSTEM_PROMPT_RECOMMENDATION` —
+  урезанный, без item_type, UPDATE recommendations + INSERT recommendation_persons).
+  Два error-marker'а (`_mark_news_error`, `_mark_recommendation_error`).
+  `analyze_all` — два прохода последовательно; global config error на news-pass
+  прерывает batch до recs-pass; на recs-pass — news уже закоммичены.
+  3-tier error handling — see "Error handling tiers" above.
 - **`name_matcher.py`** — pymorphy3-based surname matching against company
   seed lists. Runs on `headline + body` after LLM call. Pure function, no
   state, no network.
 - **`reporter.py`** — generates Obsidian MD + `data.xlsx` + `persons.csv`
-  from SQLite. Wipes `output/<COMPANY>/news/` before regen for deterministic
-  file numbering. Timezone conversion UTC → Europe/Moscow happens here.
+  from SQLite. Wipes `output/<COMPANY>/{news,recommendations}/` перед regen
+  для deterministic file numbering. Read-query — UNION ALL над
+  `news WHERE item_type='recommendation'` + `recommendations` с tie-break
+  `ORDER BY published_at, _src_table, source_code, url`. `data.xlsx` теперь
+  с **двумя листами** (`news` — только item_type='news'; `recommendations` —
+  UNION со структурными колонками). YAML frontmatter не содержит ключей
+  для `NULL` значений (target_price etc отсутствуют у legacy finam-recs).
+  Timezone UTC → Europe/Moscow happens here.
 - **`text_cleanup.py`** — `clean_text()` and `sanitize_inline_code()`.
   Shared utilities for normalising news text downstream of fetch (used by
   fetcher/analyzer/reporter). **Different from** `_clean_text` inside each
@@ -322,9 +359,11 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   `base.py` (ABC + `FetchContext` + `RawItem`), `playwright_base.py`
   (`PlaywrightSource` mixin for Cloudflare/WAF sites — used by finam).
 - **`cloud_sync/`** — `pusher.py` (`push_all`, `init_schema`, `PushStats`,
-  `_mask_db_url`) + `schema.sql` (Postgres DDL for `trading_news.*` schema).
-  Connects via Supabase pooler; reads SQLite read-only, UPSERTs Postgres
-  in one transaction.
+  `_mask_db_url`) + `schema.sql` (Postgres DDL for `trading_news.*` schema —
+  7 таблиц). Connects via Supabase pooler; reads SQLite read-only, UPSERTs
+  Postgres in one transaction в **строгом порядке**: companies → sources →
+  persons → news → recommendations → news_persons → recommendation_persons.
+  Junctions последними чтобы FK были satisfied.
 
 ## Style preferences (learned over the build)
 
