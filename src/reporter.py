@@ -42,7 +42,14 @@ from src.config import Config
 
 log = logging.getLogger(__name__)
 
-XLSX_COLUMNS = ["date", "headline", "persons", "mood", "item_type"]
+XLSX_COLUMNS_NEWS = ["date", "headline", "persons", "mood", "item_type"]
+# Recommendations sheet расширен структурными полями (multipliers_json как plain text)
+XLSX_COLUMNS_RECS = [
+    "date", "headline", "persons", "mood", "source",
+    "target_price", "recommendation_action", "potential_pct", "multipliers",
+]
+# Backward-compat alias для существующих тестов
+XLSX_COLUMNS = XLSX_COLUMNS_NEWS
 
 # Короткие алиасы источников для имени файла. `corp` — официальный сайт компании
 # (источник её собственных пресс-релизов); остальные — 3-буквенные сокращения.
@@ -132,19 +139,38 @@ def _report_company(
     affiliate_dir.mkdir(parents=True, exist_ok=True)
     news_list_dir.mkdir(parents=True, exist_ok=True)
 
+    # UNION ALL: news (включая finam-recs через item_type) + recommendations.
+    # Deterministic tie-break: published_at, _src_table, source_code, url
+    # (codex 06 P1.3 — без него nn нестабилен при коллизии timestamp'ов).
+    # Новые структурные поля (target_price, ...) у news всегда NULL.
     rows = list(conn.execute(
-        "SELECT n.id, n.url, n.headline, n.body, n.published_at, n.mood, n.mood_reason, "
-        "       n.item_type, s.code AS source_code "
-        "FROM news n JOIN sources s ON s.id = n.source_id "
-        "WHERE n.company_id = ? AND n.status = 'analyzed' "
-        "ORDER BY n.published_at ASC, n.id ASC",
-        (company_id,),
+        """
+        SELECT n.id AS id, n.url AS url, n.headline AS headline, n.body AS body,
+               n.published_at AS published_at, n.mood AS mood, n.mood_reason AS mood_reason,
+               n.item_type AS item_type, s.code AS source_code,
+               NULL AS target_price, NULL AS recommendation_action,
+               NULL AS potential_pct, NULL AS multipliers_json,
+               'news' AS _src_table
+        FROM news n JOIN sources s ON s.id = n.source_id
+        WHERE n.company_id = :cid AND n.status = 'analyzed'
+        UNION ALL
+        SELECT r.id AS id, r.url AS url, r.headline AS headline, r.body AS body,
+               r.published_at AS published_at, r.mood AS mood, r.mood_reason AS mood_reason,
+               'recommendation' AS item_type, s.code AS source_code,
+               r.target_price AS target_price, r.recommendation_action AS recommendation_action,
+               r.potential_pct AS potential_pct, r.multipliers_json AS multipliers_json,
+               'recommendations' AS _src_table
+        FROM recommendations r JOIN sources s ON s.id = r.source_id
+        WHERE r.company_id = :cid AND r.status = 'analyzed'
+        ORDER BY published_at ASC, _src_table ASC, source_code ASC, url ASC
+        """,
+        {"cid": company_id},
     ))
 
     md_files = 0
-    xlsx_rows: list[dict] = []
-    # Day counter scoped per (item_type, day) to avoid ordinal collision between
-    # news/ and recommendations/ folders.
+    news_xlsx_rows: list[dict] = []
+    rec_xlsx_rows: list[dict] = []
+    # Day counter scoped per (folder, day) — folder ∈ {'news', 'recommendations'}.
     day_counter: dict[tuple[str, str], int] = defaultdict(int)
 
     for row in rows:
@@ -152,26 +178,39 @@ def _report_company(
         pub_local = pub_utc.astimezone(tz)
         date_key = pub_local.strftime("%Y_%m_%d")
         item_type = row["item_type"] or "news"
-        day_counter[(item_type, date_key)] += 1
-        nn = day_counter[(item_type, date_key)]
+        # Route к нужной папке: 'news' если item_type='news', иначе 'recommendations'.
+        # Покрывает оба источника recs: legacy news.item_type='recommendation' (finam)
+        # и новую таблицу recommendations.
+        folder = "news" if item_type == "news" else "recommendations"
+        day_counter[(folder, date_key)] += 1
+        nn = day_counter[(folder, date_key)]
 
-        persons = [
-            r["full_name"]
-            for r in conn.execute(
+        # Persons-link диспатчим по _src_table — две разные junction-таблицы.
+        if row["_src_table"] == "news":
+            persons_query = (
                 "SELECT p.full_name FROM news_persons np JOIN persons p ON p.id = np.person_id "
-                "WHERE np.news_id = ? ORDER BY p.full_name",
-                (row["id"],),
+                "WHERE np.news_id = ? ORDER BY p.full_name"
             )
-        ]
+        else:
+            persons_query = (
+                "SELECT p.full_name FROM recommendation_persons rp "
+                "JOIN persons p ON p.id = rp.person_id "
+                "WHERE rp.recommendation_id = ? ORDER BY p.full_name"
+            )
+        persons = [r["full_name"] for r in conn.execute(persons_query, (row["id"],))]
 
-        # Defensive cleanup: html.unescape + strip inline JS/CSS. Для уже
-        # хранящихся в БД грязных строк чистит at-read-time; для свежих fetch'ей
-        # (после фикса парсера) — no-op. См. src/text_cleanup.py.
         headline_clean = html_module.unescape(row["headline"])
         body_clean = clean_text(row["body"])
 
-        # Route к нужной папке по item_type
-        target_root = rec_dir if item_type == "recommendation" else news_dir
+        target_root = rec_dir if folder == "recommendations" else news_dir
+        # Optional structural extras для frontmatter (NULL-keys будут отброшены
+        # в _write_md — codex 06 P2.4).
+        extras = {
+            "target_price": row["target_price"],
+            "recommendation_action": row["recommendation_action"],
+            "potential_pct": row["potential_pct"],
+            "multipliers_json": row["multipliers_json"],
+        }
         md_path = _write_md(
             target_root, pub_local, nn,
             url=row["url"],
@@ -182,26 +221,48 @@ def _report_company(
             source_code=row["source_code"],
             persons=persons,
             item_type=item_type,
+            extras=extras,
         )
         if md_path:
             md_files += 1
 
-        xlsx_rows.append({
-            "date": pub_local.strftime("%Y_%m_%d"),
-            "headline": headline_clean,
-            "persons": ", ".join(persons),
-            "mood": row["mood"],
-            "item_type": item_type,
-        })
+        date_str = pub_local.strftime("%Y_%m_%d")
+        headline_for_xlsx = headline_clean
+        persons_str = ", ".join(persons)
+        if folder == "news":
+            news_xlsx_rows.append({
+                "date": date_str,
+                "headline": headline_for_xlsx,
+                "persons": persons_str,
+                "mood": row["mood"],
+                "item_type": item_type,
+            })
+        else:
+            rec_xlsx_rows.append({
+                "date": date_str,
+                "headline": headline_for_xlsx,
+                "persons": persons_str,
+                "mood": row["mood"],
+                "source": row["source_code"],
+                "target_price": row["target_price"],
+                "recommendation_action": row["recommendation_action"],
+                "potential_pct": row["potential_pct"],
+                "multipliers": row["multipliers_json"],
+            })
 
     persons_count = _write_persons_csv(conn, company_id, affiliate_dir / "persons.csv")
-    xlsx_written = _write_xlsx_atomic(news_list_dir / "data.xlsx", xlsx_rows)
+    xlsx_written = _write_xlsx_atomic(
+        news_list_dir / "data.xlsx",
+        news_rows=news_xlsx_rows,
+        rec_rows=rec_xlsx_rows,
+    )
+    xlsx_total = len(news_xlsx_rows) + len(rec_xlsx_rows)
 
     return ReportResult(
         company=company_name,
         md_files=md_files,
         persons_rows=persons_count,
-        xlsx_rows=len(xlsx_rows),
+        xlsx_rows=xlsx_total,
         xlsx_written=xlsx_written,
     )
 
@@ -222,6 +283,7 @@ def _write_md(
     source_code: str,
     persons: list[str],
     item_type: str = "news",
+    extras: dict | None = None,
 ) -> Path | None:
     year = pub_local.strftime("%Y")
     year_month = pub_local.strftime("%Y_%m")
@@ -229,15 +291,12 @@ def _write_md(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     date_prefix = pub_local.strftime("%Y_%m_%d")
-    # Имя файла строится из mood_reason (макс 50 символов), что лучше отражает
-    # содержание для пользователя, чем первые слова заголовка. Если mood_reason
-    # пуст — fallback на headline (на случай legacy/edge-case строк).
     slug = make_slug(mood_reason or headline, max_chars=50)
     src_slug = _source_slug(source_code)
     filename = f"{date_prefix}_{src_slug}_{slug}_{nn:02d}.md"
     path = target_dir / filename
 
-    frontmatter = _yaml_frontmatter({
+    frontmatter_data: dict = {
         "date": pub_local.strftime("%Y-%m-%d"),
         "datetime": pub_local.isoformat(),
         "source": source_code,
@@ -246,7 +305,15 @@ def _write_md(
         "mood_reason": mood_reason,
         "item_type": item_type,
         "persons": persons,
-    })
+    }
+    # Структурные extras (target_price, ...) — добавляем ТОЛЬКО непустые
+    # (codex 06 P2.4: ключи с None не должны появляться в frontmatter).
+    if extras:
+        for k, v in extras.items():
+            if v is not None and v != "":
+                frontmatter_data[k] = v
+
+    frontmatter = _yaml_frontmatter(frontmatter_data)
 
     path.write_text(
         f"{frontmatter}\n# {headline}\n\n{body}\n",
@@ -260,18 +327,31 @@ def _write_persons_csv(
     company_id: int,
     path: Path,
 ) -> int:
+    # CTE c UNION ALL — упоминания персон в news и в recommendations считаются
+    # вместе. После γ-completion (когда finam-recs мигрируют) CTE сократится
+    # до single source.
     sql = """
+        WITH all_mentions AS (
+            SELECT np.person_id AS person_id, n.mood AS mood
+            FROM news_persons np
+            JOIN news n ON n.id = np.news_id
+            WHERE n.status = 'analyzed'
+            UNION ALL
+            SELECT rp.person_id AS person_id, r.mood AS mood
+            FROM recommendation_persons rp
+            JOIN recommendations r ON r.id = rp.recommendation_id
+            WHERE r.status = 'analyzed'
+        )
         SELECT
           p.full_name,
           p.status,
           p.brand,
-          SUM(CASE WHEN n.mood='pos'     THEN 1 ELSE 0 END) AS pos_freq,
-          SUM(CASE WHEN n.mood='neg'     THEN 1 ELSE 0 END) AS neg_freq,
-          SUM(CASE WHEN n.mood='neutral' THEN 1 ELSE 0 END) AS zero_freq,
-          COUNT(n.id) AS total_freq
+          SUM(CASE WHEN m.mood='pos'     THEN 1 ELSE 0 END) AS pos_freq,
+          SUM(CASE WHEN m.mood='neg'     THEN 1 ELSE 0 END) AS neg_freq,
+          SUM(CASE WHEN m.mood='neutral' THEN 1 ELSE 0 END) AS zero_freq,
+          SUM(CASE WHEN m.person_id IS NOT NULL THEN 1 ELSE 0 END) AS total_freq
         FROM persons p
-        LEFT JOIN news_persons np ON np.person_id = p.id
-        LEFT JOIN news n          ON n.id = np.news_id AND n.status='analyzed'
+        LEFT JOIN all_mentions m ON m.person_id = p.id
         WHERE p.company_id = ?
         GROUP BY p.id
         ORDER BY total_freq DESC, p.full_name ASC
@@ -294,15 +374,39 @@ def _write_persons_csv(
     return len(rows)
 
 
-def _write_xlsx_atomic(path: Path, rows: list[dict]) -> bool:
-    """Write rows to ``path`` via a temp file. Return False if the final
-    replace fails because Excel has the file open."""
+def _write_xlsx_atomic(
+    path: Path,
+    *,
+    news_rows: list[dict] | None = None,
+    rec_rows: list[dict] | None = None,
+    rows: list[dict] | None = None,  # legacy kwarg для backward-compat
+) -> bool:
+    """Write two-sheet workbook (news + recommendations) to ``path`` via temp.
+    Return False if the final replace fails because Excel has the file open.
+
+    Behavior change vs v2: первый лист 'news' содержит только news.item_type='news'
+    (раньше — все строки включая finam-recs). Recommendations теперь на втором
+    листе с дополнительными колонками target_price/recommendation_action/etc.
+    Документировано в commit message + spec 06 P2.5.
+    """
+    # Legacy single-arg path (используется test_reporter.py существующими тестами)
+    if rows is not None and news_rows is None and rec_rows is None:
+        news_rows = rows
+        rec_rows = []
+    news_rows = news_rows or []
+    rec_rows = rec_rows or []
+
     wb = Workbook()
-    ws = wb.active
-    ws.title = "news"
-    ws.append(XLSX_COLUMNS)
-    for r in rows:
-        ws.append([r[c] for c in XLSX_COLUMNS])
+    ws_news = wb.active
+    ws_news.title = "news"
+    ws_news.append(XLSX_COLUMNS_NEWS)
+    for r in news_rows:
+        ws_news.append([r.get(c) for c in XLSX_COLUMNS_NEWS])
+
+    ws_recs = wb.create_sheet("recommendations")
+    ws_recs.append(XLSX_COLUMNS_RECS)
+    for r in rec_rows:
+        ws_recs.append([r.get(c) for c in XLSX_COLUMNS_RECS])
 
     tmp_fd, tmp_name = tempfile.mkstemp(prefix="data_", suffix=".xlsx", dir=str(path.parent))
     os.close(tmp_fd)

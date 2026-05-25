@@ -65,3 +65,46 @@ CREATE TABLE IF NOT EXISTS trading_news.news_persons (
     FOREIGN KEY (company_name, person_full_name)
         REFERENCES trading_news.persons (company_name, full_name) ON DELETE CASCADE
 );
+
+-- v3 (task 06): отдельная таблица recommendations + junction.
+-- Стратегия γ: finam-recs остаются в news.item_type='recommendation';
+-- recommendation-only источники (lmsic в задаче 07) пишут сюда.
+CREATE TABLE IF NOT EXISTS trading_news.recommendations (
+    source_code   TEXT NOT NULL REFERENCES trading_news.sources(code) ON DELETE CASCADE,
+    url           TEXT NOT NULL,
+    company_name  TEXT NOT NULL REFERENCES trading_news.companies(name) ON DELETE CASCADE,
+    headline      TEXT NOT NULL,
+    body          TEXT,
+    published_at  TIMESTAMPTZ NOT NULL,
+    fetched_at    TIMESTAMPTZ,
+    mood          TEXT CHECK (mood IS NULL OR mood IN ('pos','neutral','neg')),
+    mood_reason   TEXT,
+    target_price          DOUBLE PRECISION,
+    recommendation_action TEXT CHECK (recommendation_action IS NULL OR recommendation_action IN ('buy','hold','sell')),
+    potential_pct         DOUBLE PRECISION,
+    multipliers_json      TEXT,
+    status        TEXT NOT NULL DEFAULT 'new'
+                  CHECK (status IN ('new','analyzed','error')),
+    error_msg     TEXT,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    tokens_used   INTEGER,
+    PRIMARY KEY (source_code, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tn_recs_company_date
+    ON trading_news.recommendations (company_name, published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tn_recs_status
+    ON trading_news.recommendations (status);
+
+-- Зеркалит news_persons structurally — composite natural key + двойной FK.
+CREATE TABLE IF NOT EXISTS trading_news.recommendation_persons (
+    source_code      TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    company_name     TEXT NOT NULL,
+    person_full_name TEXT NOT NULL,
+    PRIMARY KEY (source_code, url, company_name, person_full_name),
+    FOREIGN KEY (source_code, url)
+        REFERENCES trading_news.recommendations (source_code, url) ON DELETE CASCADE,
+    FOREIGN KEY (company_name, person_full_name)
+        REFERENCES trading_news.persons (company_name, full_name) ON DELETE CASCADE
+);

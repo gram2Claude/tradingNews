@@ -122,10 +122,14 @@ def test_report_wipes_both_folders_on_regen(cfg: Config) -> None:
     assert len(rec_md_v2) == 1   # новый MD в recommendations/
 
 
-def test_xlsx_has_item_type_column(cfg: Config) -> None:
-    """Excel header order: date, headline, persons, mood, item_type."""
+def test_xlsx_has_two_sheets_with_recs_on_second(cfg: Config) -> None:
+    """Excel workbook has two sheets: 'news' (только item_type='news') и
+    'recommendations' (включает finam-recs из news.item_type='recommendation' +
+    отдельную таблицу recommendations). Behavior change в задаче 06 — см.
+    spec P2.5."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
+    # finam-style recommendation попадёт в news с item_type='recommendation'
     _insert_news(conn, headline="A", body="Body",
                  mood="pos", published_utc=datetime(2026, 5, 19, tzinfo=timezone.utc),
                  item_type="recommendation")
@@ -133,11 +137,26 @@ def test_xlsx_has_item_type_column(cfg: Config) -> None:
     conn.close()
     reporter.report_all(cfg, "X5")
     wb = load_workbook(cfg.output_root / "X5" / "news_list" / "data.xlsx")
-    ws = wb.active
-    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
-    assert headers == ["date", "headline", "persons", "mood", "item_type"]
-    # Data row last column = item_type
-    assert ws.cell(2, 5).value == "recommendation"
+    # Два листа в порядке news → recommendations
+    assert wb.sheetnames == ["news", "recommendations"]
+
+    # Sheet news — только заголовок, никаких finam-recs строк
+    ws_news = wb["news"]
+    news_headers = [ws_news.cell(1, c).value for c in range(1, ws_news.max_column + 1)]
+    assert news_headers == ["date", "headline", "persons", "mood", "item_type"]
+    assert ws_news.max_row == 1  # только header, нет данных
+
+    # Sheet recommendations содержит finam-rec строку
+    ws_recs = wb["recommendations"]
+    rec_headers = [ws_recs.cell(1, c).value for c in range(1, ws_recs.max_column + 1)]
+    assert rec_headers == [
+        "date", "headline", "persons", "mood", "source",
+        "target_price", "recommendation_action", "potential_pct", "multipliers",
+    ]
+    # finam-style рекомендация — target_price etc остаются NULL (legacy путь)
+    assert ws_recs.max_row == 2
+    assert ws_recs.cell(2, 2).value == "A"  # headline
+    assert ws_recs.cell(2, 4).value == "pos"  # mood
 
 
 # NOTE: sanitize_inline_code / clean_text покрыты в tests/test_text_cleanup.py.

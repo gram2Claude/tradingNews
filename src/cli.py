@@ -171,14 +171,15 @@ def cmd_sync_cloud(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
+    db.ensure_migrated(cfg)
     rows = db.status_counts(cfg, args.company)
     if not rows:
-        print("No news in DB yet.")
+        print("No items in DB yet.")
         return 0
-    print(f"{'company':<20} {'status':<12} {'count':>8}")
-    print("-" * 42)
+    print(f"{'company':<20} {'kind':<16} {'status':<12} {'count':>8}")
+    print("-" * 58)
     for r in rows:
-        print(f"{r['company']:<20} {r['status']:<12} {r['cnt']:>8}")
+        print(f"{r['company']:<20} {r['kind']:<16} {r['status']:<12} {r['cnt']:>8}")
     return 0
 
 

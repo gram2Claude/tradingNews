@@ -4,20 +4,46 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
 from src.config import CompanyCfg
 
 
+class ItemDestination(Enum):
+    """Куда fetcher диспатчит RawItem'ы конкретного source'а.
+
+    NEWS — таблица `news` (x5_ir, finam, rbc — default).
+    RECOMMENDATIONS — таблица `recommendations` (lmsic и будущие recommendation-only).
+
+    γ-стратегия (см. spec 06): finam остаётся в NEWS+item_type, новая таблица
+    наполняется только source'ами которые знают что они recommendation-only.
+    """
+
+    NEWS = "news"
+    RECOMMENDATIONS = "recommendations"
+
+
 @dataclass
 class RawItem:
-    """One news item discovered from a source."""
+    """One item discovered from a source.
+
+    Базовые поля заполняют все source'ы. Опциональные структурные поля
+    (target_price, recommendation_action, potential_pct, multipliers_json)
+    заполняют только recommendation-source'ы (lmsic — задача 07); для news
+    они остаются None. Контракт фиксирован в задаче 06 чтобы избежать
+    переделок RawItem на каждом новом source'е.
+    """
 
     url: str
     headline: str
     body: str | None
     published_at: datetime   # timezone-aware UTC
+    target_price: float | None = None
+    recommendation_action: str | None = None  # 'buy' | 'hold' | 'sell' | None
+    potential_pct: float | None = None
+    multipliers_json: str | None = None
 
 
 @dataclass
@@ -109,6 +135,10 @@ def _dedup_preserve_order(items: Iterable[str]) -> list[str]:
 
 class Source(ABC):
     code: str
+    # Куда fetcher пишет RawItem'ы этого source'а. Default — NEWS (backward-compat
+    # для x5_ir / finam / rbc). recommendation-only source'ы переопределяют
+    # в class-level (`item_destination = ItemDestination.RECOMMENDATIONS`).
+    item_destination: ItemDestination = ItemDestination.NEWS
 
     def __init__(
         self,
