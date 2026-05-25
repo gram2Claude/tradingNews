@@ -6,7 +6,29 @@ Issues deferred from reviews — not blocking current ship, but worth tracking.
 
 ## Open
 
-(пусто)
+### δ-completion: устранить дуальный read-path для recommendations
+*Источник: spec/plan 06 `recommendations_split` (γ-стратегия, осознанный техдолг).*
+*Открыто: 2026-05-25 (после merge PR #4).*
+
+После задачи 06 рекомендации хранятся в двух источниках:
+- `news WHERE item_type='recommendation'` — legacy finam-recs (существующие данные)
+- `recommendations` — новая таблица, заполняется recommendation-only источниками (lmsic из задачи 07)
+
+Reporter, persons.csv, data.xlsx делают UNION над обоими. См.
+`02_plans/06_claude_recommendations_split_plan.md` секция «Locations to
+remember during γ» — там перечислены все места.
+
+**Scope δ-completion (~1 день):**
+- Migration v3 → v4: `INSERT INTO recommendations SELECT ... FROM news WHERE item_type='recommendation'; DELETE FROM news WHERE item_type='recommendation'; ALTER TABLE news DROP COLUMN item_type;`
+- analyzer: убрать SYSTEM_PROMPT_NEWS секцию про item_type классификацию (либо сделать per-item dispatcher если finam останется mixed-stream)
+- reporter: UNION → single SELECT FROM recommendations
+- persons.csv: убрать UNION в CTE
+- data.xlsx: больше нет смешанной семантики
+
+**Trigger:** finam recommendation accuracy становится бизнес-критичным,
+ИЛИ появляется второй mixed-stream источник (где LLM-классификация
+item_type снова нужна), ИЛИ разработчик устал поддерживать дуальный
+read-path при правках reporter'а.
 
 ---
 
