@@ -91,6 +91,15 @@ def sqlite_with_data(tmp_path: Path) -> Path:
                            UNIQUE(source_id, url));
         CREATE TABLE news_persons (news_id INTEGER, person_id INTEGER,
                                    PRIMARY KEY (news_id, person_id));
+        CREATE TABLE recommendations (id INTEGER PRIMARY KEY, company_id INTEGER,
+                           source_id INTEGER, url TEXT, headline TEXT, body TEXT,
+                           published_at TEXT, fetched_at TEXT, mood TEXT, mood_reason TEXT,
+                           target_price REAL, recommendation_action TEXT,
+                           potential_pct REAL, multipliers_json TEXT,
+                           status TEXT, error_msg TEXT, retry_count INTEGER, tokens_used INTEGER,
+                           UNIQUE(source_id, url));
+        CREATE TABLE recommendation_persons (recommendation_id INTEGER, person_id INTEGER,
+                                             PRIMARY KEY (recommendation_id, person_id));
     """)
     conn.execute("INSERT INTO companies (id, name, start_date) VALUES (1, 'X5', '2026-05-01')")
     conn.execute("INSERT INTO sources (id, code, name, base_url, enabled) VALUES "

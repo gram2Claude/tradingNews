@@ -12,7 +12,7 @@ from datetime import date, datetime, time, timezone
 
 from src import db
 from src.config import Config
-from src.sources.base import FetchContext, RawItem, Source
+from src.sources.base import FetchContext, ItemDestination, RawItem, Source
 from src.sources.finam import FinamSource
 from src.sources.rbc import RBCSource
 from src.sources.x5_ir import X5IRSource
@@ -126,10 +126,17 @@ def _fetch_one(
     inserted = 0
     errors = 0
     log.info("fetch start: company=%s source=%s since=%s", company_name, source_code, since.isoformat())
+    destination = source.item_destination
     try:
         for item in source.fetch(since):
             fetched += 1
-            if _insert(conn, company_id=company_id, source_id=source_id, item=item):
+            if _insert(
+                conn,
+                company_id=company_id,
+                source_id=source_id,
+                item=item,
+                destination=destination,
+            ):
                 inserted += 1
     except Exception as exc:
         log.exception("fetch failed: %s/%s: %s", company_name, source_code, exc)
@@ -144,12 +151,34 @@ def _fetch_one(
     )
 
 
-def _insert(conn: sqlite3.Connection, *, company_id: int, source_id: int, item: RawItem) -> bool:
-    # Чистим headline/body ПЕРЕД записью в БД — это единая точка normalize'а
-    # для всех источников. Снимает HTML-entities (&quot; и т.п.), отрезает
-    # inline JS/CSS-дампы из widget'ов и footer-блоки пресс-релизов. После
-    # этого analyzer и reporter получают уже чистые данные из БД (свои
-    # clean_text-вызовы остаются как defense-in-depth и no-op для свежих fetch'ей).
+def _insert(
+    conn: sqlite3.Connection,
+    *,
+    company_id: int,
+    source_id: int,
+    item: RawItem,
+    destination: ItemDestination = ItemDestination.NEWS,
+) -> bool:
+    """Dispatch RawItem to the right table based on source's item_destination.
+
+    Чистка headline/body — единая точка normalize'а для всех источников.
+    Снимает HTML-entities, inline JS/CSS из widget'ов, footer-блоки. После
+    этого analyzer/reporter получают уже чистые данные из БД.
+    """
+    if destination is ItemDestination.NEWS:
+        return _insert_into_news(
+            conn, company_id=company_id, source_id=source_id, item=item
+        )
+    if destination is ItemDestination.RECOMMENDATIONS:
+        return _insert_into_recommendations(
+            conn, company_id=company_id, source_id=source_id, item=item
+        )
+    raise ValueError(f"unknown ItemDestination: {destination!r}")
+
+
+def _insert_into_news(
+    conn: sqlite3.Connection, *, company_id: int, source_id: int, item: RawItem
+) -> bool:
     cur = conn.execute(
         "INSERT OR IGNORE INTO news "
         "(company_id, source_id, url, headline, body, published_at) "
@@ -161,6 +190,30 @@ def _insert(conn: sqlite3.Connection, *, company_id: int, source_id: int, item: 
             clean_text(item.headline),
             clean_text(item.body) if item.body else item.body,
             item.published_at.astimezone(timezone.utc).isoformat(),
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def _insert_into_recommendations(
+    conn: sqlite3.Connection, *, company_id: int, source_id: int, item: RawItem
+) -> bool:
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO recommendations "
+        "(company_id, source_id, url, headline, body, published_at, "
+        " target_price, recommendation_action, potential_pct, multipliers_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            company_id,
+            source_id,
+            item.url,
+            clean_text(item.headline),
+            clean_text(item.body) if item.body else item.body,
+            item.published_at.astimezone(timezone.utc).isoformat(),
+            item.target_price,
+            item.recommendation_action,
+            item.potential_pct,
+            item.multipliers_json,
         ),
     )
     return cur.rowcount > 0

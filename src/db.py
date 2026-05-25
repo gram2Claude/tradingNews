@@ -9,7 +9,7 @@ from src.config import Config, PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS news (
     fetched_at    TEXT DEFAULT CURRENT_TIMESTAMP,
     mood          TEXT,
     mood_reason   TEXT,
-    item_type     TEXT NOT NULL DEFAULT 'news',  -- 'news' | 'recommendation' (v2)
+    item_type     TEXT NOT NULL DEFAULT 'news',  -- 'news' | 'recommendation' (v2; γ-legacy после v3)
     status        TEXT DEFAULT 'new',
     error_msg     TEXT,
     retry_count   INTEGER DEFAULT 0,
@@ -64,6 +64,42 @@ CREATE TABLE IF NOT EXISTS news_persons (
     person_id  INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
     PRIMARY KEY (news_id, person_id)
 );
+
+-- v3: торговые рекомендации хранятся в отдельной таблице (стратегия γ).
+-- finam-recs остаются в news.item_type='recommendation' (legacy путь);
+-- новые recommendation-only источники (lmsic и далее) пишут сюда.
+CREATE TABLE IF NOT EXISTS recommendations (
+    id                    INTEGER PRIMARY KEY,
+    company_id            INTEGER NOT NULL REFERENCES companies(id),
+    source_id             INTEGER NOT NULL REFERENCES sources(id),
+    url                   TEXT NOT NULL,
+    headline              TEXT NOT NULL,
+    body                  TEXT,
+    published_at          TEXT NOT NULL,
+    fetched_at            TEXT DEFAULT CURRENT_TIMESTAMP,
+    mood                  TEXT,
+    mood_reason           TEXT,
+    target_price          REAL,
+    recommendation_action TEXT,                 -- 'buy' | 'hold' | 'sell' | NULL
+    potential_pct         REAL,
+    multipliers_json      TEXT,                 -- '{"EV/EBITDA":4.1,"P/E":6.8,...}'
+    status                TEXT DEFAULT 'new',
+    error_msg             TEXT,
+    retry_count           INTEGER DEFAULT 0,
+    tokens_used           INTEGER,
+    UNIQUE (source_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_company_date ON recommendations(company_id, published_at);
+CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status);
+
+CREATE TABLE IF NOT EXISTS recommendation_persons (
+    recommendation_id  INTEGER NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+    person_id          INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    PRIMARY KEY (recommendation_id, person_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recommendation_persons_person ON recommendation_persons(person_id);
 """
 
 
@@ -135,19 +171,26 @@ def init_db(cfg: Config) -> dict[str, int]:
 
 def ensure_migrated(cfg: Config) -> None:
     """Lightweight migration check. Called at start of cmd_fetch/analyze/report/cycle
-    so a v1 DB picked up after `git pull` migrates without explicit `init-db`.
+    so an older DB picked up after `git pull` migrates without explicit `init-db`.
 
     Idempotent: PRAGMA user_version check skips no-op cases in ~1ms. Does NOT
-    re-seed sources/persons (that's `init_db`'s job).
+    re-seed sources/persons (that's `init_db`'s job). Migration chain runs in
+    order: v1 → v2 → v3. Each step bumps user_version inside its own transaction;
+    a crash mid-step leaves user_version at the previous level, so the next call
+    retries cleanly.
     """
     conn = connect(cfg.db_path)
     try:
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         if user_version >= SCHEMA_VERSION:
             return
-        _migrate_to_v2(conn)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
+        if user_version < 2:
+            _migrate_to_v2(conn)
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+        if user_version < 3:
+            _migrate_to_v3(conn)
+            # _migrate_to_v3 already sets user_version=3 inside its own transaction
     finally:
         conn.close()
 
@@ -173,6 +216,81 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         log.info("db: migrated v1 → v2 (added news.item_type)")
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: add `recommendations` and `recommendation_persons` tables.
+
+    Транзакционная и идемпотентная:
+    - `CREATE TABLE IF NOT EXISTS` — повторный запуск no-op.
+    - `PRAGMA user_version = 3` ставится **последним** в той же транзакции.
+    - При сбое любой операции внутри — ROLLBACK откатывает всё, включая DDL.
+      user_version не сдвигается, partial state не возникает,
+      `ensure_migrated` починит на следующем запуске.
+    - На fresh DB вызывается уже после executescript(SCHEMA_SQL) — все таблицы
+      созданы, операции no-op, version выставляется идемпотентно.
+
+    Используем SAVEPOINT вместо BEGIN/COMMIT: Python sqlite3 в legacy isolation
+    mode делает implicit commit перед DDL, ломая `with conn:` для CREATE TABLE.
+    SAVEPOINT уважает DDL независимо от isolation_level.
+    """
+    conn.execute("SAVEPOINT v3_migration")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id                    INTEGER PRIMARY KEY,
+                company_id            INTEGER NOT NULL REFERENCES companies(id),
+                source_id             INTEGER NOT NULL REFERENCES sources(id),
+                url                   TEXT NOT NULL,
+                headline              TEXT NOT NULL,
+                body                  TEXT,
+                published_at          TEXT NOT NULL,
+                fetched_at            TEXT DEFAULT CURRENT_TIMESTAMP,
+                mood                  TEXT,
+                mood_reason           TEXT,
+                target_price          REAL,
+                recommendation_action TEXT,
+                potential_pct         REAL,
+                multipliers_json      TEXT,
+                status                TEXT DEFAULT 'new',
+                error_msg             TEXT,
+                retry_count           INTEGER DEFAULT 0,
+                tokens_used           INTEGER,
+                UNIQUE (source_id, url)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_persons (
+                recommendation_id  INTEGER NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+                person_id          INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+                PRIMARY KEY (recommendation_id, person_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recommendations_company_date "
+            "ON recommendations(company_id, published_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recommendations_status "
+            "ON recommendations(status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recommendation_persons_person "
+            "ON recommendation_persons(person_id)"
+        )
+        conn.execute("PRAGMA user_version = 3")
+    except Exception:
+        conn.execute("ROLLBACK TO v3_migration")
+        conn.execute("RELEASE v3_migration")
+        raise
+    else:
+        conn.execute("RELEASE v3_migration")
+        conn.commit()
+    log.info("db: migrated v2 → v3 (added recommendations + recommendation_persons)")
+
+
 def _load_seed_persons(conn: sqlite3.Connection, company_id: int, csv_path: Path) -> None:
     with csv_path.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -187,18 +305,29 @@ def _load_seed_persons(conn: sqlite3.Connection, company_id: int, csv_path: Path
 
 
 def status_counts(cfg: Config, company: str | None = None) -> list[sqlite3.Row]:
-    """Return counts of news by status, optionally filtered by company name."""
+    """Return counts by status across both `news` and `recommendations` tables.
+
+    Each row has columns: company, kind, status, cnt.
+    `kind` ∈ {'news', 'recommendations'}. Optionally filter by company name.
+    """
     conn = connect(cfg.db_path)
     try:
         sql = (
-            "SELECT c.name AS company, n.status, COUNT(*) AS cnt "
+            "SELECT c.name AS company, 'news' AS kind, n.status AS status, COUNT(*) AS cnt "
             "FROM news n JOIN companies c ON c.id = n.company_id "
+        )
+        sql_recs = (
+            "SELECT c.name AS company, 'recommendations' AS kind, r.status AS status, COUNT(*) AS cnt "
+            "FROM recommendations r JOIN companies c ON c.id = r.company_id "
         )
         params: tuple = ()
         if company:
             sql += "WHERE c.name = ? "
-            params = (company,)
-        sql += "GROUP BY c.name, n.status ORDER BY c.name, n.status"
-        return list(conn.execute(sql, params))
+            sql_recs += "WHERE c.name = ? "
+            params = (company, company)
+        sql += "GROUP BY c.name, n.status "
+        sql_recs += "GROUP BY c.name, r.status "
+        full = f"{sql} UNION ALL {sql_recs} ORDER BY company, kind, status"
+        return list(conn.execute(full, params))
     finally:
         conn.close()

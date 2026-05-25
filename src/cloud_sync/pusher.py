@@ -33,13 +33,17 @@ class PushStats:
     sources: int = 0
     persons: int = 0
     news: int = 0
+    recommendations: int = 0          # v3 (task 06)
     news_persons: int = 0
+    recommendation_persons: int = 0   # v3 (task 06)
 
     def __str__(self) -> str:
         return (
             f"companies={self.companies} sources={self.sources} "
             f"persons={self.persons} news={self.news} "
-            f"news_persons={self.news_persons}"
+            f"recommendations={self.recommendations} "
+            f"news_persons={self.news_persons} "
+            f"recommendation_persons={self.recommendation_persons}"
         )
 
 
@@ -93,6 +97,18 @@ def _push_inner(
     dst: psycopg.Connection,
     company: str | None,
 ) -> PushStats:
+    """Explicit push order — junctions последними чтобы их FK были satisfied
+    (codex 06 P1.4). Одна транзакция; rollback на любой ошибке.
+
+    Order:
+      1. companies
+      2. sources
+      3. persons
+      4. news
+      5. recommendations
+      6. news_persons (FK → news + persons)
+      7. recommendation_persons (FK → recommendations + persons)
+    """
     stats = PushStats()
 
     with dst.cursor() as cur:
@@ -100,7 +116,9 @@ def _push_inner(
         stats.sources = _push_sources(src, cur)
         stats.persons = _push_persons(src, cur, company)
         stats.news = _push_news(src, cur, company)
+        stats.recommendations = _push_recommendations(src, cur, company)
         stats.news_persons = _push_news_persons(src, cur, company)
+        stats.recommendation_persons = _push_recommendation_persons(src, cur, company)
 
     return stats
 
@@ -247,6 +265,93 @@ def _push_news_persons(
         return 0
     cur.executemany(
         "INSERT INTO trading_news.news_persons "
+        "(source_code, url, company_name, person_full_name) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (source_code, url, company_name, person_full_name) DO NOTHING",
+        rows,
+    )
+    return len(rows)
+
+
+def _push_recommendations(
+    src: sqlite3.Connection,
+    cur: psycopg.Cursor,
+    company: str | None,
+) -> int:
+    sql = (
+        "SELECT s.code AS source_code, r.url, c.name AS company_name, "
+        "r.headline, r.body, r.published_at, r.fetched_at, "
+        "r.mood, r.mood_reason, r.target_price, r.recommendation_action, "
+        "r.potential_pct, r.multipliers_json, r.status, "
+        "r.error_msg, r.retry_count, r.tokens_used "
+        "FROM recommendations r "
+        "JOIN companies c ON c.id = r.company_id "
+        "JOIN sources s ON s.id = r.source_id"
+    )
+    params: tuple = ()
+    if company:
+        sql += " WHERE c.name = ?"
+        params = (company,)
+    rows = [
+        (
+            r["source_code"], r["url"], r["company_name"], r["headline"], r["body"],
+            r["published_at"], r["fetched_at"], r["mood"], r["mood_reason"],
+            r["target_price"], r["recommendation_action"], r["potential_pct"],
+            r["multipliers_json"], r["status"], r["error_msg"], r["retry_count"],
+            r["tokens_used"],
+        )
+        for r in src.execute(sql, params)
+    ]
+    if not rows:
+        return 0
+    cur.executemany(
+        "INSERT INTO trading_news.recommendations "
+        "(source_code, url, company_name, headline, body, published_at, fetched_at, "
+        " mood, mood_reason, target_price, recommendation_action, potential_pct, "
+        " multipliers_json, status, error_msg, retry_count, tokens_used) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (source_code, url) DO UPDATE SET "
+        "company_name = EXCLUDED.company_name, "
+        "headline = EXCLUDED.headline, body = EXCLUDED.body, "
+        "published_at = EXCLUDED.published_at, fetched_at = EXCLUDED.fetched_at, "
+        "mood = EXCLUDED.mood, mood_reason = EXCLUDED.mood_reason, "
+        "target_price = EXCLUDED.target_price, "
+        "recommendation_action = EXCLUDED.recommendation_action, "
+        "potential_pct = EXCLUDED.potential_pct, "
+        "multipliers_json = EXCLUDED.multipliers_json, "
+        "status = EXCLUDED.status, error_msg = EXCLUDED.error_msg, "
+        "retry_count = EXCLUDED.retry_count, tokens_used = EXCLUDED.tokens_used",
+        rows,
+    )
+    return len(rows)
+
+
+def _push_recommendation_persons(
+    src: sqlite3.Connection,
+    cur: psycopg.Cursor,
+    company: str | None,
+) -> int:
+    sql = (
+        "SELECT s.code AS source_code, r.url, c.name AS company_name, "
+        "p.full_name AS person_full_name "
+        "FROM recommendation_persons rp "
+        "JOIN recommendations r ON r.id = rp.recommendation_id "
+        "JOIN persons p ON p.id = rp.person_id "
+        "JOIN companies c ON c.id = r.company_id "
+        "JOIN sources s ON s.id = r.source_id"
+    )
+    params: tuple = ()
+    if company:
+        sql += " WHERE c.name = ?"
+        params = (company,)
+    rows = [
+        (r["source_code"], r["url"], r["company_name"], r["person_full_name"])
+        for r in src.execute(sql, params)
+    ]
+    if not rows:
+        return 0
+    cur.executemany(
+        "INSERT INTO trading_news.recommendation_persons "
         "(source_code, url, company_name, person_full_name) "
         "VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (source_code, url, company_name, person_full_name) DO NOTHING",
