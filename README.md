@@ -122,8 +122,9 @@ pytest -q
 | ------------- | --------------------- | ---------------------------------------------------------------- |
 | `x5_ir`       | ✅ активен            | Корпоративный сайт X5 (`www.x5.ru/ru/press-center/press-releases/`) |
 | `finam`       | ✅ активен            | `finam.ru/quote/moex/x5/publications/` через Playwright + stealth |
-| `rbc`         | ⏸ временно остановлен | RSS работает, но `enabled: false` — разработка приостановлена    |
-| `e_disclosure`| 🚧 не реализован      | Recon есть (см. `tests/fixtures/EDISCLOSURE_RECON.md`), кода нет |
+| `lmsic`       | ✅ активен            | `lmsic.com/analytics/ideas/` — recommendation-only (httpx + selectolax) |
+| `rbc`         | 🗄 архивирован        | Код + recon в `work_directory/_archive/` (задача 08)             |
+| `e_disclosure`| 🗄 архивирован        | Recon в `work_directory/_archive/` (задача 08), имплементации не было |
 
 Body всех активных парсеров проходит через `_clean_text` (snimet HTML-сущности,
 NBSP, control-символы; сжимает whitespace) — в БД попадает чистый plain-text

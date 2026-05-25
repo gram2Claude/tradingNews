@@ -55,7 +55,6 @@ XLSX_COLUMNS = XLSX_COLUMNS_NEWS
 # (источник её собственных пресс-релизов); остальные — 3-буквенные сокращения.
 _SOURCE_SLUG_ALIAS: dict[str, str] = {
     "x5_ir": "corp",
-    "rbc": "rbc",
     "finam": "fnm",
 }
 

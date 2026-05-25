@@ -15,7 +15,6 @@ from src.config import Config
 from src.sources.base import FetchContext, ItemDestination, RawItem, Source
 from src.sources.finam import FinamSource
 from src.sources.lmsic import LmsicSource
-from src.sources.rbc import RBCSource
 from src.sources.x5_ir import X5IRSource
 from src.text_cleanup import clean_text
 
@@ -24,7 +23,6 @@ log = logging.getLogger(__name__)
 
 SOURCE_REGISTRY: dict[str, type[Source]] = {
     "x5_ir": X5IRSource,
-    "rbc": RBCSource,
     "finam": FinamSource,
     "lmsic": LmsicSource,
 }
