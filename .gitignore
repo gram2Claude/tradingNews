@@ -77,3 +77,6 @@ Desktop.ini
 *.tmp
 ~$*.xlsx
 codex_05_raw.txt
+
+# --- gstack/codex session artefacts (ephemeral, per-session) ---
+.context/
