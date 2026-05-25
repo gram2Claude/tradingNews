@@ -269,10 +269,9 @@ def test_filename_falls_back_to_headline_if_mood_reason_empty(cfg: Config) -> No
 
 
 def test_source_slug_known_codes() -> None:
-    """x5_ir → corp; finam → fnm; rbc → rbc."""
+    """x5_ir → corp (alias); finam → fnm (alias)."""
     assert reporter._source_slug("x5_ir") == "corp"
     assert reporter._source_slug("finam") == "fnm"
-    assert reporter._source_slug("rbc") == "rbc"
 
 
 def test_source_slug_unknown_falls_back_to_first3_alnum() -> None:

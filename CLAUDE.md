@@ -31,7 +31,10 @@ don't duplicate the conversation in chat once a file exists, edit it in place.
 **Архив:** задачи, развитие которых остановлено, переезжают в
 `work_directory/_archive/<подпапка>/` с сохранением структуры подпапок и имени
 файла (`_archive/01_specs/02_rbc_news_spec.md` и т.д.). Сейчас в архиве лежат
-артефакты задач `02_rbc_news` и `03_e_disclosure`.
+артефакты задач `02_rbc_news` и `03_e_disclosure`, а также их код, тесты и
+фикстуры (`_archive/src/sources/rbc.py`, `_archive/tests/test_rbc_parser.py`,
+`_archive/tests/fixtures/{RBC_RECON.md,rbc_rss_sample.xml,EDISCLOSURE_RECON.md,edisclosure_*.html}`) —
+полностью отключены в задаче 08 (см. CHANGELOG / git history `archive_rbc_edisclosure`).
 
 ## Commands
 
@@ -144,7 +147,7 @@ trees перед regen so file numbering is stable.
   `recommendation_action`, `potential_pct`, `multipliers_json`); туда пишут
   только recommendation-only источники (lmsic, задача 07).
 - **`Source.item_destination` enum** управляет диспатчем в `fetcher._insert`:
-  `NEWS` (default — x5_ir/finam/rbc) или `RECOMMENDATIONS` (lmsic).
+  `NEWS` (default — x5_ir/finam) или `RECOMMENDATIONS` (lmsic).
   finam **сознательно** оставлен на `NEWS` со смешанным `item_type` —
   это γ-стратегия из spec 06 (см. `TODOS.md → δ-completion` про устранение
   дуального read-path в будущем).
@@ -157,13 +160,15 @@ trees перед regen so file numbering is stable.
   Денормализация: Postgres ключует строки натуральными ключами
   (`companies.name`, `sources.code`, `news.(source_code, url)`), не суррогатными
   SQLite `id` — id'шки SQLite drift'ятся между машинами.
-- **Keyword filter at fetch stage** (для shared news streams вроде RSS РБК):
+- **Keyword filter at fetch stage** (для shared news streams):
   prefilter by strong keywords (aliases + brands) before insertion. Weak-only
-  matches (bare surname) are rejected to avoid homonymy. Применяется в `rbc`
-  (сейчас остановлен) через `src/sources/rbc.py:_keyword_match` с pymorphy3
-  для русских declensions. Для finam используется более узкий **slug
+  matches (bare surname) are rejected to avoid homonymy. Каноничный пример —
+  архивный `_archive/src/sources/rbc.py:_keyword_match` с pymorphy3 для
+  русских declensions (RSS RBC). Для finam используется более узкий **slug
   relevance filter** — анализ ASCII-transliterated slug'а на токены
-  (`pyaterochka`, `iks-5`, `chizhik`) без LLM.
+  (`pyaterochka`, `iks-5`, `chizhik`) без LLM. lmsic использует case-insensitive
+  substring против `FetchContext.load_keywords().strong` (issuer-title — короткое
+  структурное поле, lemma-match не нужен).
 
 ### Error handling tiers (analyzer)
 
@@ -214,15 +219,16 @@ HTML search to RSS after recon found Qrator JS-challenge on www.rbc.ru.
   через selectolax, whitelist по class (`bold font-xl` + `p-margin`) —
   отбрасывает price ticker, "Купить на демосчёт", AI-инсайты, social footer.
   См. `tests/fixtures/FINAM_RECON.md`.
-- `rbc` — **архивирован** (`config.yaml: enabled: false`, артефакты в
-  `work_directory/_archive/`). Код в `src/sources/rbc.py` оставлен. RSS at
-  `rssexport.rbc.ru/rbcnews/news/30/full.rss`. Main rbc.ru закрыт Qrator
-  JS-challenge. Жёсткий лимит 30 items / ~7-часовое окно, backfill через
-  RSS невозможен. Возвращать только под конкретный use-case.
-- `e_disclosure` — **архивирован, имплементации нет** (recon в
-  `tests/fixtures/EDISCLOSURE_RECON.md`, spec/plan в
-  `work_directory/_archive/{01_specs,02_plans,03_estimates}/03_*`,
-  `src/sources/e_disclosure.py` отсутствует).
+- `rbc` — **полностью архивирован в задаче 08**. Код, тесты и фикстуры в
+  `work_directory/_archive/{src/sources/rbc.py,tests/test_rbc_parser.py,tests/fixtures/{RBC_RECON.md,rbc_rss_sample.xml}}`.
+  RSS at `rssexport.rbc.ru/rbcnews/news/30/full.rss` работал, но жёсткий лимит
+  30 items / ~7-часовое окно и закрытый Qrator JS-challenge'ом main rbc.ru
+  делают backfill невозможным. Возвращать только под конкретный use-case через
+  восстановление из git.
+- `e_disclosure` — **полностью архивирован в задаче 08**. Recon и spec/plan в
+  `work_directory/_archive/{01_specs,02_plans,03_estimates}/03_*` и
+  `_archive/tests/fixtures/{EDISCLOSURE_RECON.md,edisclosure_*.html}`. Имплементации
+  не было; для восстановления — начинать с recon заново.
 
 ### Body cleaning convention
 
@@ -259,13 +265,9 @@ LLM улетают на нерелевантный текст, а LLM начин
   anywhere in `src/`.
 - `error_msg` stores only the exception class name, not the full message —
   avoids leaking diagnostic detail to disk.
-- **XML parsing uses `defusedxml`**, not stdlib `xml.etree` — protects RSS
-  / XML sources from XXE / billion-laughs / external-DTD attacks (PSF
-  recommendation).
-- **`FeedParseError` (in `rbc.py`) on whole-feed failures** — broken XML,
-  missing `<channel>`, HTML interstitial with 200. Propagates as
-  `errors += 1` in `_fetch_one` so a silently dead source doesn't masquerade
-  as a successful empty fetch.
+- **XML parsing uses `defusedxml`** (актуально для архивного rbc.py и любых
+  будущих XML-источников) — protects RSS / XML sources from XXE / billion-laughs /
+  external-DTD attacks (PSF recommendation).
 - **Keyword filter uses strong/weak split + pymorphy3 lemmatization** —
   strong terms (aliases, brands) alone pass; weak terms (surnames) alone
   reject (homonymy defense — `Гусев` from another region doesn't trigger).
@@ -355,7 +357,7 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   fetcher/analyzer/reporter). **Different from** `_clean_text` inside each
   source module — those run at extraction time on raw HTML; `text_cleanup`
   runs on already-cleaned text further down the pipeline.
-- **`sources/`** — one file per news provider (`x5_ir`, `finam`, `rbc`),
+- **`sources/`** — one file per news provider (`x5_ir`, `finam`, `lmsic`),
   `base.py` (ABC + `FetchContext` + `RawItem`), `playwright_base.py`
   (`PlaywrightSource` mixin for Cloudflare/WAF sites — used by finam).
 - **`cloud_sync/`** — `pusher.py` (`push_all`, `init_schema`, `PushStats`,

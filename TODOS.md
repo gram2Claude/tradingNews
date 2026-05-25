@@ -34,6 +34,24 @@ read-path при правках reporter'а.
 
 ## Done
 
+### RBC + e_disclosure окончательно архивированы (задача 08)
+*Источник: пользовательское решение 2026-05-25 после ship'а задачи 07.*
+*Закрыто: 2026-05-25.*
+
+Перенесены в `work_directory/_archive/`:
+- `src/sources/rbc.py` → `_archive/src/sources/rbc.py`
+- `tests/test_rbc_parser.py` → `_archive/tests/test_rbc_parser.py`
+- `tests/fixtures/{RBC_RECON.md, rbc_rss_sample.xml, EDISCLOSURE_RECON.md, edisclosure_*.html}` → `_archive/tests/fixtures/`
+
+Удалены из активного кода: `SOURCE_REGISTRY`, `_SOURCE_SLUG_ALIAS`, `config.yaml`-блоки.
+Документация (CLAUDE.md, README.md) обновлена — оба источника помечены как
+**полностью архивированы**. Pytest получил `testpaths = tests`, чтобы не подбирать
+тесты из архива. После очистки: 215 тестов (было 241; -26 от удалённого
+test_rbc_parser.py), ruff + mypy clean.
+
+Восстановление возможно через git history; для e_disclosure — recon придётся
+делать заново (фикстуры в архиве, но имплементации не было).
+
 ### init-db не синхронизирует `sources.enabled` с конфигом — STALE
 *Источник: `work_directory/04_reviews/02_claude_rbc_news_rew.md` P3 #4 (2026-05-21).*
 *Закрыто: 2026-05-23.*

@@ -14,7 +14,7 @@ from src.config import CompanyCfg
 class ItemDestination(Enum):
     """Куда fetcher диспатчит RawItem'ы конкретного source'а.
 
-    NEWS — таблица `news` (x5_ir, finam, rbc — default).
+    NEWS — таблица `news` (x5_ir, finam — default).
     RECOMMENDATIONS — таблица `recommendations` (lmsic и будущие recommendation-only).
 
     γ-стратегия (см. spec 06): finam остаётся в NEWS+item_type, новая таблица
@@ -61,7 +61,7 @@ class Keywords:
     downstream name_matcher in the analyzer stage, but do not let weak alone
     decide fetch acceptance.
 
-    See variant B in `estimates/02_codex_rbc_news_est.md` discussion.
+    See variant B in `_archive/03_estimates/02_codex_rbc_news_est.md` discussion.
     """
 
     strong: list[str] = field(default_factory=list)
@@ -136,7 +136,7 @@ def _dedup_preserve_order(items: Iterable[str]) -> list[str]:
 class Source(ABC):
     code: str
     # Куда fetcher пишет RawItem'ы этого source'а. Default — NEWS (backward-compat
-    # для x5_ir / finam / rbc). recommendation-only source'ы переопределяют
+    # для x5_ir / finam). recommendation-only source'ы переопределяют
     # в class-level (`item_destination = ItemDestination.RECOMMENDATIONS`).
     item_destination: ItemDestination = ItemDestination.NEWS
 
