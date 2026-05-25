@@ -1,8 +1,8 @@
 # Spec 07 — Источник торговых рекомендаций lmsic.com/analytics/ideas
 
-Статус: BLOCKED by 06 (ждёт ship задачи `recommendations_split`)
-Дата: 2026-05-23
-Ветка: создать новую `lmsic_ideas` от master ПОСЛЕ merge задачи 06
+Статус: **APPROVED** (все P1-P9 закрыты; task 06 merged 2026-05-25, разблокировано)
+Дата: 2026-05-23 (создан), 2026-05-25 (unblocked)
+Ветка: `lmsic_ideas` от master
 Зависит от:
 - `01_*_spec.md` (Source ABC, БД, конфиг)
 - `06_recommendations_split_spec.md` (новая таблица `recommendations`, dispatcher в fetcher, reporter dual-source)
@@ -453,3 +453,61 @@ LmsicSource.fetch(since):
 - P9 — Формат body: только текст / preformatted header + текст
 
 После ответов перевожу статус в **APPROVED** и иду в Phase 3 (recon) → план 06.
+
+---
+
+## Update after task 06 ship (2026-05-25)
+
+Task 06 (`recommendations_split`) merged в master (PR #4). Архитектура изменилась —
+часть ответов в этой спеке нужно перечитать под новый код:
+
+### P1 — `item_type` больше не применяется к lmsic
+
+Раньше план был: hardcode `item_type='recommendation'` на этапе INSERT в `news`.
+
+**Теперь:** lmsic объявляет `item_destination = ItemDestination.RECOMMENDATIONS` как
+class-level атрибут `Source`. `fetcher._insert` диспатчит в `_insert_into_recommendations`
+по этому полю и пишет в **отдельную таблицу `recommendations`** (со структурными
+полями `target_price`, `recommendation_action`, `potential_pct`, `multipliers_json`).
+Колонка `news.item_type` к lmsic-данным вообще не относится — мы не пишем в `news`.
+
+P1.A "hardcode item_type" → **заменено на:** lmsic.`item_destination = ItemDestination.RECOMMENDATIONS`.
+
+### P3-EXT — реализовано в task 06
+
+Все архитектурные пункты P3-EXT (`recommendations` table, dispatcher, persons junction
+`recommendation_persons`, reporter UNION, cloud sync 7-table push) — **ship'нуты**.
+γ-стратегия для finam подтверждена. δ-completion трекается в `TODOS.md`.
+
+### Новое в RawItem (готово принимать lmsic-данные)
+
+`src/sources/base.py:RawItem` уже расширен опциональными полями:
+- `target_price: float | None`
+- `recommendation_action: str | None` (`'buy'` / `'hold'` / `'sell'`)
+- `potential_pct: float | None`
+- `multipliers_json: str | None`
+
+lmsic-парсер должен парсить эти поля из листинга/детальной страницы. Если recon
+покажет что P/E + EV/EBITDA + Net debt/EBITDA нужно сериализовать — формат:
+`{"ev_ebitda": 4.1, "p_e": 6.8, "nd_ebitda": 1.2}`.
+
+### `recommendation_action` enum в БД
+
+Postgres mirror имеет CHECK: `recommendation_action IN ('buy','hold','sell')`. SQLite
+проверки нет, но lmsic-парсер должен мапить русское «не рекомендуется покупать» → `'sell'`.
+Маппинг — задача парсера, не LLM (рекомендация в lmsic — структурное поле, не текст).
+
+### Что ещё в силе из старых ответов
+
+- P2.A — фильтр по эмитент-полю в листинге ✅
+- P4.A — MVP первая страница, без AJAX ✅
+- P5.B — реальный URL детальной страницы (recon уточнит) ✅
+- P7 — без `lmsic_*` в CompanyCfg ✅
+- P8 — cadence 4 часа (через общий `cycle`) ✅
+- P9.B — body с preformatted header + текст ✅
+
+### Связанный план / recon — следующие шаги
+
+- Phase 3: `tests/fixtures/LMSIC_RECON.md` — открытые вопросы recon'а из секции «Что вскрыл первичный recon»
+- Phase 2: `work_directory/02_plans/07_claude_lmsic_ideas_plan.md` — пишется после recon'а
+
