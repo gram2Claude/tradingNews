@@ -1,12 +1,15 @@
-"""Tests for reporter dual-source UNION behaviour (task 06 T5).
+"""Tests for reporter recommendations behaviour (task 06 T5 + task 08 δ-completion).
 
 Covers:
-* recommendations from new table → routed to recommendations/ folder
-* finam-recs (news.item_type='recommendation') → также в recommendations/
+* recommendations from recommendations table → routed to recommendations/ folder
 * deterministic numbering when timestamps collide (tie-break)
 * NULL structural fields в frontmatter отсутствуют (не "None")
 * xlsx второй лист содержит структурные колонки
 * persons.csv агрегирует упоминания из обеих junction-таблиц
+
+После δ-completion (task 08): news table не имеет item_type — рекомендации
+живут только в recommendations table. Legacy «finam через news.item_type=
+'recommendation'» путь убран; тесты упрощены.
 """
 from __future__ import annotations
 
@@ -80,16 +83,16 @@ def _insert_news(
     body: str,
     published_utc: datetime,
     mood: str = "neutral",
-    item_type: str = "news",
     source_code: str = "x5_ir",
 ) -> int:
+    """δ-completion: news не имеет item_type. Helper только для plain news."""
     cid = conn.execute("SELECT id FROM companies WHERE name='X5'").fetchone()["id"]
     sid = conn.execute("SELECT id FROM sources WHERE code=?", (source_code,)).fetchone()["id"]
     cur = conn.execute(
         "INSERT INTO news (company_id, source_id, url, headline, body, "
-        "published_at, mood, mood_reason, item_type, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'reason', ?, 'analyzed')",
-        (cid, sid, url, headline, body, published_utc.isoformat(), mood, item_type),
+        "published_at, mood, mood_reason, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'reason', 'analyzed')",
+        (cid, sid, url, headline, body, published_utc.isoformat(), mood),
     )
     return cur.lastrowid
 
@@ -124,15 +127,16 @@ def test_recommendation_routes_to_recommendations_folder(cfg: Config) -> None:
     assert len(rec_files) == 1
 
 
-def test_finam_legacy_rec_also_routes_to_recommendations(cfg: Config) -> None:
-    """news.item_type='recommendation' (γ legacy) идёт в ту же папку
-    recommendations/, что и записи из новой таблицы."""
+def test_finam_classified_rec_routes_to_recommendations(cfg: Config) -> None:
+    """δ-completion: после per-item dispatch finam-rec уже в recommendations
+    table (analyzer переместил). Reporter читает оттуда и кладёт в
+    output/X5/recommendations/."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    _insert_news(
-        conn, url="https://finam.ru/r1", headline="finam rec", body="Body",
-        published_utc=datetime(2026, 5, 19, tzinfo=timezone.utc),
-        item_type="recommendation",
+    _insert_recommendation(
+        conn, url="https://finam.ru/r1", headline="finam rec post-dispatch",
+        body="Body", published_utc=datetime(2026, 5, 19, tzinfo=timezone.utc),
+        # NULL structural fields — типичная finam-row после per-item dispatch
     )
     conn.commit()
     conn.close()
@@ -147,29 +151,33 @@ def test_finam_legacy_rec_also_routes_to_recommendations(cfg: Config) -> None:
 
 
 def test_recommendations_tie_break_stable_numbering(cfg: Config) -> None:
-    """Два item'а с одинаковым published_at (один из news, один из recs) —
-    deterministic order: 'news' < 'recommendations' по _src_table. Повторный
-    report_all даёт идентичные имена файлов."""
+    """Два recommendation item'а с одинаковым published_at — deterministic
+    order по (source_code ASC, url ASC). Повторный report_all даёт идентичные
+    имена файлов (idempotency)."""
     db.init_db(cfg)
+    # Регистрируем дополнительный source чтобы можно было различать по source_code
     conn = db.connect(cfg.db_path)
+    conn.execute(
+        "INSERT INTO sources (code, name, base_url, enabled) "
+        "VALUES ('lmsic', 'LMS', 'https://lmsic.com/', 1)"
+    )
     same_ts = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
-    _insert_news(
+    _insert_recommendation(
         conn, url="https://finam.ru/r1", headline="finam recommendation",
-        body="Body", published_utc=same_ts, item_type="recommendation",
+        body="Body", published_utc=same_ts, source_code="x5_ir",  # уже из cfg fixture
     )
     _insert_recommendation(
         conn, url="https://lmsic.com/r1", headline="lmsic recommendation",
         body="Body", published_utc=same_ts, target_price=100.0,
+        source_code="lmsic",
     )
     conn.commit()
     conn.close()
 
     reporter.report_all(cfg, "X5")
-    # Map file → headline (читаем frontmatter/headline для идентификации источника)
     rec_files1 = {p.name: p.read_text(encoding="utf-8")
                   for p in (cfg.output_root / "X5" / "recommendations").rglob("*.md")}
 
-    # Re-run: имена должны совпасть (idempotent regen с deterministic order)
     reporter.report_all(cfg, "X5")
     rec_files2 = {p.name: p.read_text(encoding="utf-8")
                   for p in (cfg.output_root / "X5" / "recommendations").rglob("*.md")}
@@ -177,12 +185,11 @@ def test_recommendations_tie_break_stable_numbering(cfg: Config) -> None:
     assert set(rec_files1.keys()) == set(rec_files2.keys())
     assert len(rec_files1) == 2
 
-    # Identify which file is _01 vs _02 by filename suffix
+    # ORDER BY source_code ASC: 'lmsic' < 'x5_ir' → lmsic gets _01
     file_01 = next(name for name in rec_files1 if "_01.md" in name)
     file_02 = next(name for name in rec_files1 if "_02.md" in name)
-    # _01 принадлежит news (legacy finam) по _src_table='news' < 'recommendations'
-    assert "finam recommendation" in rec_files1[file_01]
-    assert "lmsic recommendation" in rec_files1[file_02]
+    assert "lmsic recommendation" in rec_files1[file_01]
+    assert "finam recommendation" in rec_files1[file_02]
 
 
 # ----------------------------------------------------------- frontmatter NULL
@@ -279,7 +286,7 @@ def test_persons_csv_unions_news_and_recommendation_mentions(cfg: Config) -> Non
         "SELECT id FROM persons WHERE full_name='Игорь Шехтерман'"
     ).fetchone()["id"]
 
-    # Один news + linked person
+    # Один news + linked person (item_type убран — все news = news после δ)
     nid = _insert_news(
         conn, url="https://x.x/n1", headline="X5 news",
         body="Шехтерман прокомментировал", mood="pos",

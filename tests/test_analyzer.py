@@ -103,12 +103,14 @@ def test_analyze_cleans_body_before_llm_call(cfg: Config) -> None:
     assert conn.execute("SELECT status FROM news WHERE id=?", (nid,)).fetchone()[0] == "analyzed"
 
 
-def test_analyze_extracts_item_type_recommendation(cfg: Config) -> None:
-    """LLM возвращает item_type='recommendation' — записывается в БД."""
+def test_analyze_dispatches_recommendation_to_recs_table(cfg: Config) -> None:
+    """δ-completion: LLM возвращает item_type='recommendation' → строка
+    мигрирует в recommendations table; в news её больше нет."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
     nid = _seed_news(conn, "AFK Sistema аналитика",
                      "Брокер X понизил target по акциям AFK Sistema; рекомендация — sell. " * 10)
+    src_url = conn.execute("SELECT url FROM news WHERE id=?", (nid,)).fetchone()[0]
     conn.commit()
     conn.close()
 
@@ -124,13 +126,50 @@ def test_analyze_extracts_item_type_recommendation(cfg: Config) -> None:
         analyzer.analyze_all(cfg, "X5")
 
     conn = db.connect(cfg.db_path)
-    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    # news row исчезла (cross-table move + CASCADE)
+    assert conn.execute("SELECT 1 FROM news WHERE id=?", (nid,)).fetchone() is None
+    # Recommendation row появилась с тем же source/url, mood='neg'
+    rec = conn.execute(
+        "SELECT mood, status, target_price FROM recommendations WHERE url=?",
+        (src_url,),
+    ).fetchone()
+    assert rec is not None
+    assert rec["status"] == "analyzed"
+    assert rec["mood"] == "neg"
+    assert rec["target_price"] is None  # finam-style row без structural fields
+
+
+def test_analyze_keeps_news_in_news_table(cfg: Config) -> None:
+    """δ-completion: LLM возвращает item_type='news' → строка остаётся в news."""
+    db.init_db(cfg)
+    conn = db.connect(cfg.db_path)
+    nid = _seed_news(conn, "Корпоративная новость X5",
+                     "Длинный текст пресс-релиза о новых планах. " * 10)
+    conn.commit()
+    conn.close()
+
+    fake = _fake_response(json.dumps({
+        "mood": "pos", "mood_reason": "ok", "item_type": "news",
+    }))
+    with patch.object(analyzer, "OpenAI") as cls:
+        client = MagicMock()
+        client.chat.completions.create.return_value = fake
+        cls.return_value = client
+        analyzer.analyze_all(cfg, "X5")
+
+    conn = db.connect(cfg.db_path)
+    row = conn.execute("SELECT status, mood FROM news WHERE id=?", (nid,)).fetchone()
+    assert row is not None
     assert row["status"] == "analyzed"
-    assert row["item_type"] == "recommendation"
+    assert row["mood"] == "pos"
+    # Recommendations table не получила эту строку
+    cnt = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    assert cnt == 0
 
 
 def test_analyze_defaults_item_type_to_news_if_missing(cfg: Config) -> None:
-    """Если LLM не вернул item_type — fallback to 'news' (backwards-compat)."""
+    """Если LLM не вернул item_type — fallback to 'news' (backwards-compat).
+    После δ-completion: строка просто остаётся в news (никакого dispatch'а)."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
     nid = _seed_news(conn, "Old-style mock", "Body длиннее MIN_BODY_CHARS чтобы попасть в LLM-ветку. " * 10)
@@ -146,9 +185,12 @@ def test_analyze_defaults_item_type_to_news_if_missing(cfg: Config) -> None:
         analyzer.analyze_all(cfg, "X5")
 
     conn = db.connect(cfg.db_path)
-    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    row = conn.execute("SELECT status, mood FROM news WHERE id=?", (nid,)).fetchone()
     assert row["status"] == "analyzed"
-    assert row["item_type"] == "news"  # default
+    assert row["mood"] == "pos"
+    # И не уехала в recommendations
+    cnt = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    assert cnt == 0
 
 
 def test_analyze_rejects_invalid_item_type(cfg: Config) -> None:
@@ -175,8 +217,9 @@ def test_analyze_rejects_invalid_item_type(cfg: Config) -> None:
     assert "parse" in (row["error_msg"] or "")
 
 
-def test_short_body_default_item_type_is_news(cfg: Config) -> None:
-    """Short-body skip path: item_type остаётся 'news' (DB default), LLM не вызван."""
+def test_short_body_skip_path_stays_in_news(cfg: Config) -> None:
+    """Short-body skip path: LLM не вызван, строка остаётся в news (без
+    классификации). После δ-completion: news table не имеет item_type."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
     nid = _seed_news(conn, "Короткая", "Коротко.")  # < MIN_BODY_CHARS
@@ -190,10 +233,12 @@ def test_short_body_default_item_type_is_news(cfg: Config) -> None:
         analyzer.analyze_all(cfg, "X5")
 
     conn = db.connect(cfg.db_path)
-    row = conn.execute("SELECT * FROM news WHERE id=?", (nid,)).fetchone()
+    row = conn.execute("SELECT status, mood FROM news WHERE id=?", (nid,)).fetchone()
     assert row["status"] == "analyzed"
     assert row["mood"] == "neutral"
-    assert row["item_type"] == "news"  # DB default sustained
+    # И не уехала в recommendations
+    cnt = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    assert cnt == 0
 
 
 def test_happy_path(cfg: Config) -> None:

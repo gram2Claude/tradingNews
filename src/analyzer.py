@@ -3,14 +3,21 @@
 Два независимых пути:
 
 1. **news**: для каждой ``news`` строки с ``status='new' AND retry_count < 3``
-   запрашиваем у GPT-5 mini ``mood`` + ``mood_reason`` + ``item_type``,
-   matches persons → ``news_persons``, UPDATE news.
-2. **recommendations**: то же самое для ``recommendations`` таблицы, но
-   ``item_type`` не запрашивается (вся таблица == recommendation by definition),
-   persons → ``recommendation_persons``, UPDATE recommendations.
+   запрашиваем у GPT-5 mini ``mood`` + ``mood_reason`` + ``item_type``.
+   После δ-completion (task 08): **per-item dispatch**:
+   - ``item_type='news'``: matches persons → ``news_persons``, UPDATE news.
+   - ``item_type='recommendation'``: cross-table move в одной транзакции —
+     INSERT в ``recommendations``, INSERT в ``recommendation_persons``,
+     DELETE из ``news`` (CASCADE подчистит ``news_persons``).
+2. **recommendations**: для каждой ``recommendations`` строки с
+   ``status='new'`` — ``mood`` + ``mood_reason`` (item_type не нужен,
+   вся таблица == recommendation by definition), persons →
+   ``recommendation_persons``, UPDATE recommendations.
 
-Стратегия γ (см. spec 06): finam-recs остаются в news+item_type, новая
-таблица заполняется только recommendation-only источниками (lmsic).
+После δ-completion (task 08): таблица news больше не имеет колонки
+``item_type``; finam-recs мигрированы при `ensure_migrated`. Per-item
+dispatch гарантирует что новые finam-items, классифицированные LLM как
+``recommendation``, тоже переезжают в recommendations.
 
 Network failures retry'ятся (до 3 попыток, exponential backoff) через
 ``tenacity``. Persistent failures flip ``status='error'``. JSON-shape failures
@@ -394,11 +401,27 @@ def _analyze_news(
 
     tokens = _tokens_from_response(response)
     matches = matcher.match(f"{headline}\n{body}")
+    total_attempts = start_attempt + attempts_used
 
+    if item_type == "recommendation":
+        # δ-completion: cross-table move. Атомарно (SAVEPOINT): INSERT
+        # recommendations + INSERT recommendation_persons + DELETE news.
+        # На повторном analyze того же source/url ON CONFLICT UPSERT'ит
+        # уже существующую recommendation (например после ручного rerun).
+        _dispatch_news_to_recommendations(
+            conn, news_id, mood, mood_reason, total_attempts, tokens, matches,
+        )
+        log.info(
+            "analyze: news_id=%d → recommendations (mood=%s tokens=%d persons=%d)",
+            news_id, mood, tokens, len(matches),
+        )
+        return tokens
+
+    # item_type == 'news': UPDATE news как обычно
     conn.execute(
-        "UPDATE news SET status='analyzed', mood=?, mood_reason=?, item_type=?, "
+        "UPDATE news SET status='analyzed', mood=?, mood_reason=?, "
         "retry_count=?, tokens_used=?, error_msg=NULL WHERE id=?",
-        (mood, mood_reason, item_type, start_attempt + attempts_used, tokens, news_id),
+        (mood, mood_reason, total_attempts, tokens, news_id),
     )
     for person in matches:
         conn.execute(
@@ -406,10 +429,87 @@ def _analyze_news(
             (news_id, person.id),
         )
     log.info(
-        "analyze: news_id=%d mood=%s item_type=%s tokens=%d persons=%d",
-        news_id, mood, item_type, tokens, len(matches),
+        "analyze: news_id=%d mood=%s tokens=%d persons=%d",
+        news_id, mood, tokens, len(matches),
     )
     return tokens
+
+
+def _dispatch_news_to_recommendations(
+    conn: sqlite3.Connection,
+    news_id: int,
+    mood: str,
+    mood_reason: str,
+    retry_count: int,
+    tokens: int,
+    matches: list,
+) -> None:
+    """Cross-table move: news → recommendations. Атомарно (SAVEPOINT).
+
+    LLM классифицировал news-item как recommendation. Эту строку нужно
+    перенести в recommendations с теми же base полями (url/headline/body/
+    published_at/fetched_at) плюс status='analyzed', mood/mood_reason,
+    NULL для всех структурных полей (target_price etc — у finam-recs нет
+    регулярного парсинга).
+
+    ON CONFLICT(source_id, url) DO UPDATE — защита от повторного analyze
+    (idempotent).
+    """
+    conn.execute("SAVEPOINT per_item_dispatch")
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO recommendations (
+                company_id, source_id, url, headline, body, published_at,
+                fetched_at, mood, mood_reason, status, error_msg,
+                retry_count, tokens_used,
+                target_price, recommendation_action, potential_pct, multipliers_json
+            )
+            SELECT
+                company_id, source_id, url, headline, body, published_at,
+                fetched_at, ?, ?, 'analyzed', NULL,
+                ?, ?,
+                NULL, NULL, NULL, NULL
+            FROM news WHERE id = ?
+            ON CONFLICT(source_id, url) DO UPDATE SET
+                mood = excluded.mood,
+                mood_reason = excluded.mood_reason,
+                status = 'analyzed',
+                error_msg = NULL,
+                retry_count = excluded.retry_count,
+                tokens_used = excluded.tokens_used
+            RETURNING id
+            """,
+            (mood, mood_reason, retry_count, tokens, news_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            # Source news row gone (race?) — abort move
+            raise RuntimeError(f"news_id={news_id} disappeared during dispatch")
+        rec_id = row[0] if isinstance(row, tuple) else row["id"]
+
+        # Перенос existing news_persons → recommendation_persons + добавление
+        # свежих matches (новые персоны после rerun matcher'а).
+        conn.execute(
+            "INSERT OR IGNORE INTO recommendation_persons (recommendation_id, person_id) "
+            "SELECT ?, person_id FROM news_persons WHERE news_id = ?",
+            (rec_id, news_id),
+        )
+        for person in matches:
+            conn.execute(
+                "INSERT OR IGNORE INTO recommendation_persons "
+                "(recommendation_id, person_id) VALUES (?, ?)",
+                (rec_id, person.id),
+            )
+
+        # CASCADE удалит news_persons (FK ON DELETE CASCADE)
+        conn.execute("DELETE FROM news WHERE id = ?", (news_id,))
+    except Exception:
+        conn.execute("ROLLBACK TO per_item_dispatch")
+        conn.execute("RELEASE per_item_dispatch")
+        raise
+    else:
+        conn.execute("RELEASE per_item_dispatch")
 
 
 # -------------------------------------------------------------- recommendations path

@@ -144,10 +144,10 @@ def test_cmd_status_migrates_v2_db_before_querying(cfg: Config) -> None:
         rc = cli.cmd_status(args)
     assert rc == 0
 
-    # После cmd_status БД должна быть v3 (migration сработала)
+    # После cmd_status БД должна быть v4 (migration v2→v3→v4 сработала)
     conn = sqlite3.connect(cfg.db_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}

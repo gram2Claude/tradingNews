@@ -2,6 +2,8 @@
 
 v1 → v2: added news.item_type column (task 04).
 v2 → v3: added `recommendations` + `recommendation_persons` tables (task 06).
+v3 → v4: dropped news.item_type column; moved finam-recs to recommendations
+         (task 08, δ-completion).
 """
 from __future__ import annotations
 
@@ -76,7 +78,7 @@ def _user_version(db_path: Path) -> int:
         conn.close()
 
 
-V3_TABLES = {
+V4_TABLES = {
     "companies",
     "sources",
     "news",
@@ -88,32 +90,34 @@ V3_TABLES = {
 
 
 # ---------------------------------------------------------------------------
-# v3 schema on fresh DB
+# v4 schema on fresh DB
 # ---------------------------------------------------------------------------
 
 
-def test_init_db_creates_v3_schema_on_fresh_db(cfg: Config) -> None:
+def test_init_db_creates_v4_schema_on_fresh_db(cfg: Config) -> None:
     db.init_db(cfg)
-    assert _user_version(cfg.db_path) == 3
-    assert _tables(cfg.db_path) == V3_TABLES
-    # news.item_type сохраняется (γ-legacy путь для finam-recs)
-    assert "item_type" in _columns(cfg.db_path, "news")
-    # recommendations имеет новые структурные колонки
+    assert _user_version(cfg.db_path) == 4
+    assert _tables(cfg.db_path) == V4_TABLES
+    # δ-completion: news.item_type удалён
+    assert "item_type" not in _columns(cfg.db_path, "news")
+    # recommendations имеет структурные колонки (task 06)
     rec_cols = _columns(cfg.db_path, "recommendations")
     for col in ("target_price", "recommendation_action", "potential_pct", "multipliers_json"):
         assert col in rec_cols, f"missing recommendations.{col}"
 
 
-def test_v3_indexes_created(cfg: Config) -> None:
+def test_v4_indexes_created(cfg: Config) -> None:
     db.init_db(cfg)
     idx = _indexes(cfg.db_path)
     assert "idx_recommendations_company_date" in idx
     assert "idx_recommendations_status" in idx
     assert "idx_recommendation_persons_person" in idx
+    assert "idx_news_company_date" in idx
+    assert "idx_news_status" in idx
 
 
 # ---------------------------------------------------------------------------
-# Migration chain v1 → v3
+# Migration chain v1 → v4
 # ---------------------------------------------------------------------------
 
 
@@ -149,89 +153,200 @@ def _create_v1_db(db_path: Path) -> None:
     conn.close()
 
 
-def test_init_db_migrates_v1_to_v3(cfg: Config) -> None:
-    """v1 DB → init_db: добавляет item_type (v2) и recommendations (v3)."""
+def test_init_db_migrates_v1_to_v4(cfg: Config) -> None:
+    """v1 DB → init_db: цепочка v1→v2 (item_type added) → v3 (recs tables) →
+    v4 (item_type dropped, finam-recs migrated). Existing news row сохраняется."""
     _create_v1_db(cfg.db_path)
     assert "item_type" not in _columns(cfg.db_path, "news")
     assert _user_version(cfg.db_path) == 1
 
     db.init_db(cfg)
 
-    assert _user_version(cfg.db_path) == 3
-    assert "item_type" in _columns(cfg.db_path, "news")
+    assert _user_version(cfg.db_path) == 4
+    # После v4: item_type удалён
+    assert "item_type" not in _columns(cfg.db_path, "news")
     assert "recommendations" in _tables(cfg.db_path)
     assert "recommendation_persons" in _tables(cfg.db_path)
-    # Existing news row сохранилась с default item_type='news'
+    # Existing news row сохранилась — v2 повесил item_type='news', v4 убрал колонку
+    # но строка осталась (item_type='news' rows не мигрируют, остаются в news)
     conn = sqlite3.connect(cfg.db_path)
     try:
-        rows = list(conn.execute("SELECT headline, item_type FROM news"))
+        rows = list(conn.execute("SELECT headline FROM news"))
     finally:
         conn.close()
-    assert rows == [("Old news", "news")]
+    assert rows == [("Old news",)]
 
 
-def test_init_db_idempotent_on_v3(cfg: Config) -> None:
-    """Повторный init_db на v3 — no-op."""
+def test_init_db_idempotent_on_v4(cfg: Config) -> None:
+    """Повторный init_db на v4 — no-op."""
     db.init_db(cfg)
-    assert _user_version(cfg.db_path) == 3
+    assert _user_version(cfg.db_path) == 4
     db.init_db(cfg)
-    assert _user_version(cfg.db_path) == 3
-    assert _tables(cfg.db_path) == V3_TABLES
+    assert _user_version(cfg.db_path) == 4
+    assert _tables(cfg.db_path) == V4_TABLES
 
 
-def test_ensure_migrated_upgrades_v1_to_v3(cfg: Config) -> None:
-    """ensure_migrated на v1 БД: цепочка v1 → v2 → v3."""
+def test_ensure_migrated_upgrades_v1_to_v4(cfg: Config) -> None:
+    """ensure_migrated на v1 БД: цепочка v1 → v2 → v3 → v4."""
     _create_v1_db(cfg.db_path)
 
     db.ensure_migrated(cfg)
 
-    assert _user_version(cfg.db_path) == 3
-    assert "item_type" in _columns(cfg.db_path, "news")
+    assert _user_version(cfg.db_path) == 4
+    assert "item_type" not in _columns(cfg.db_path, "news")
     assert "recommendations" in _tables(cfg.db_path)
     assert "recommendation_persons" in _tables(cfg.db_path)
 
 
-def test_ensure_migrated_upgrades_v2_to_v3(cfg: Config) -> None:
-    """ensure_migrated на полноценной v2 БД: создаёт только новые v3 таблицы."""
-    # Создаём v2 — сначала init_db на свежем пути, затем downgrade pragma
+def test_ensure_migrated_upgrades_v3_to_v4_moves_finam_recs(cfg: Config) -> None:
+    """Ключевой δ-completion тест: v3 БД с finam-rec строками →
+    после ensure_migrated всё переехало в recommendations table."""
+    # Создаём v3 БД (init_db уже мигрирует до v4; downgrade обратно к v3)
     db.init_db(cfg)
     conn = sqlite3.connect(cfg.db_path)
     try:
-        # Имитируем v2: дропаем v3 таблицы и сбрасываем версию
-        conn.execute("DROP TABLE recommendation_persons")
-        conn.execute("DROP TABLE recommendations")
-        conn.execute("PRAGMA user_version = 2")
+        # Имитируем v3: добавляем item_type column обратно (v4 миграция её удалила),
+        # сбрасываем version
+        conn.execute(
+            "ALTER TABLE news ADD COLUMN item_type TEXT NOT NULL DEFAULT 'news'"
+        )
+        # Вставляем тестовые строки: одна news, одна recommendation
+        conn.execute(
+            "INSERT INTO news (company_id, source_id, url, headline, body, "
+            "published_at, mood, mood_reason, item_type, status) "
+            "VALUES (1, 1, 'https://x.x/news1', 'Plain news', 'b', "
+            "'2026-05-01T00:00:00+00:00', 'pos', 'r', 'news', 'analyzed')"
+        )
+        conn.execute(
+            "INSERT INTO news (company_id, source_id, url, headline, body, "
+            "published_at, mood, mood_reason, item_type, status) "
+            "VALUES (1, 1, 'https://x.x/rec1', 'Finam rec', 'b', "
+            "'2026-05-02T00:00:00+00:00', 'pos', 'r', 'recommendation', 'analyzed')"
+        )
+        # Person-junction для recommendation row
+        nid = conn.execute(
+            "SELECT id FROM news WHERE url='https://x.x/rec1'"
+        ).fetchone()[0]
+        pid = conn.execute(
+            "SELECT id FROM persons WHERE full_name='Игорь Шехтерман'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO news_persons (news_id, person_id) VALUES (?, ?)",
+            (nid, pid),
+        )
+        conn.execute("PRAGMA user_version = 3")
         conn.commit()
     finally:
         conn.close()
 
-    assert _user_version(cfg.db_path) == 2
-    assert "recommendations" not in _tables(cfg.db_path)
+    assert _user_version(cfg.db_path) == 3
+    assert "item_type" in _columns(cfg.db_path, "news")
 
     db.ensure_migrated(cfg)
 
-    assert _user_version(cfg.db_path) == 3
-    assert "recommendations" in _tables(cfg.db_path)
-    assert "recommendation_persons" in _tables(cfg.db_path)
+    assert _user_version(cfg.db_path) == 4
+    assert "item_type" not in _columns(cfg.db_path, "news")
+
+    # news осталась только plain-news строка
+    conn = sqlite3.connect(cfg.db_path)
+    try:
+        news_rows = list(conn.execute("SELECT url, headline FROM news"))
+        assert news_rows == [("https://x.x/news1", "Plain news")]
+
+        # recommendations получили finam-rec строку с NULL structural fields
+        rec_rows = list(conn.execute(
+            "SELECT url, headline, mood, target_price, recommendation_action "
+            "FROM recommendations"
+        ))
+        assert rec_rows == [("https://x.x/rec1", "Finam rec", "pos", None, None)]
+
+        # junction news_persons → recommendation_persons
+        rp = list(conn.execute(
+            "SELECT person_id FROM recommendation_persons rp "
+            "JOIN recommendations r ON r.id = rp.recommendation_id "
+            "WHERE r.url = 'https://x.x/rec1'"
+        ))
+        assert len(rp) == 1
+        # И news_persons для удалённой rec-строки очищены CASCADE'ом
+        np = list(conn.execute("SELECT COUNT(*) FROM news_persons"))
+        assert np == [(0,)]
+    finally:
+        conn.close()
 
 
-def test_ensure_migrated_noop_on_v3(cfg: Config) -> None:
-    """ensure_migrated на v3 — мгновенный no-op."""
+def test_ensure_migrated_v3_to_v4_preserves_plain_news_persons(cfg: Config) -> None:
+    """Regression: при rebuild'е news таблицы (DROP + RENAME) FK CASCADE
+    не должен снести news_persons для plain-news строк. PRAGMA foreign_keys
+    нужно выключить ДО открытия SAVEPOINT (внутри транзакции это no-op).
+    """
     db.init_db(cfg)
-    assert _user_version(cfg.db_path) == 3
+    conn = sqlite3.connect(cfg.db_path)
+    try:
+        conn.execute(
+            "ALTER TABLE news ADD COLUMN item_type TEXT NOT NULL DEFAULT 'news'"
+        )
+        conn.execute(
+            "INSERT INTO news (company_id, source_id, url, headline, body, "
+            "published_at, mood, mood_reason, item_type, status) "
+            "VALUES (1, 1, 'https://x.x/news_with_person', 'Plain news', 'b', "
+            "'2026-05-01T00:00:00+00:00', 'pos', 'r', 'news', 'analyzed')"
+        )
+        nid = conn.execute(
+            "SELECT id FROM news WHERE url='https://x.x/news_with_person'"
+        ).fetchone()[0]
+        pid = conn.execute(
+            "SELECT id FROM persons WHERE full_name='Игорь Шехтерман'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO news_persons (news_id, person_id) VALUES (?, ?)",
+            (nid, pid),
+        )
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+    finally:
+        conn.close()
+
     db.ensure_migrated(cfg)
-    assert _user_version(cfg.db_path) == 3
+
+    conn = sqlite3.connect(cfg.db_path)
+    try:
+        # news-строка выжила
+        survived = list(conn.execute(
+            "SELECT url FROM news WHERE url='https://x.x/news_with_person'"
+        ))
+        assert survived == [("https://x.x/news_with_person",)]
+        # junction news_persons тоже выжил (НЕ скаскадился при DROP TABLE)
+        np = list(conn.execute(
+            "SELECT np.person_id FROM news_persons np "
+            "JOIN news n ON n.id = np.news_id "
+            "WHERE n.url='https://x.x/news_with_person'"
+        ))
+        assert len(np) == 1, f"news_persons wiped by FK cascade on DROP TABLE; got {np}"
+    finally:
+        conn.close()
+
+
+def test_ensure_migrated_noop_on_v4(cfg: Config) -> None:
+    """ensure_migrated на v4 — мгновенный no-op."""
+    db.init_db(cfg)
+    assert _user_version(cfg.db_path) == 4
+    db.ensure_migrated(cfg)
+    assert _user_version(cfg.db_path) == 4
 
 
 def test_ensure_migrated_partial_v3_recovery(cfg: Config) -> None:
     """Partial-v3 scenario: только recommendations создана, recommendation_persons нет,
     user_version=2. ensure_migrated должен дочинить (CREATE IF NOT EXISTS no-op'ает
     существующую recommendations, добавляет недостающую recommendation_persons,
-    выставляет version=3)."""
+    затем v4 миграция чистит item_type если есть)."""
     db.init_db(cfg)
     conn = sqlite3.connect(cfg.db_path)
     try:
         conn.execute("DROP TABLE recommendation_persons")
+        # Имитируем v2: добавляем item_type column обратно, сбрасываем version
+        conn.execute(
+            "ALTER TABLE news ADD COLUMN item_type TEXT NOT NULL DEFAULT 'news'"
+        )
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
     finally:
@@ -240,20 +355,18 @@ def test_ensure_migrated_partial_v3_recovery(cfg: Config) -> None:
     assert _user_version(cfg.db_path) == 2
     assert "recommendations" in _tables(cfg.db_path)
     assert "recommendation_persons" not in _tables(cfg.db_path)
+    assert "item_type" in _columns(cfg.db_path, "news")
 
     db.ensure_migrated(cfg)
 
-    assert _user_version(cfg.db_path) == 3
+    assert _user_version(cfg.db_path) == 4
     assert "recommendations" in _tables(cfg.db_path)
     assert "recommendation_persons" in _tables(cfg.db_path)
+    assert "item_type" not in _columns(cfg.db_path, "news")
 
 
 class _BoomConn:
-    """Wrapper-conn для unit-теста транзакционного rollback'а _migrate_to_v3.
-
-    Делегирует всё на реальный sqlite3.Connection, но бросает OperationalError
-    на конкретной CREATE TABLE инструкции — симулирует partial-failure внутри
-    транзакции, чтобы проверить что user_version не сдвинется."""
+    """Wrapper-conn для unit-теста транзакционного rollback'а _migrate_to_v3."""
 
     def __init__(self, real: sqlite3.Connection, fail_on_substring: str) -> None:
         self._real = real
@@ -276,12 +389,7 @@ class _BoomConn:
 
 def test_migrate_to_v3_transactional_rollback(cfg: Config) -> None:
     """Если внутри _migrate_to_v3 операция упадёт, user_version остаётся на
-    дотранзакционном уровне и таблицы не появляются.
-
-    Симулируем сбой через _BoomConn, который бросает OperationalError на CREATE
-    TABLE recommendation_persons. user_version=2 ставится ДО _migrate_to_v3 в
-    ensure_migrated, поэтому проверяем что версия не поднялась до 3."""
-    # Подготовим валидную v2 БД (без v3 таблиц)
+    дотранзакционном уровне и таблицы не появляются."""
     db.init_db(cfg)
     conn = sqlite3.connect(cfg.db_path)
     try:
@@ -301,25 +409,28 @@ def test_migrate_to_v3_transactional_rollback(cfg: Config) -> None:
     finally:
         real.close()
 
-    # user_version так и остался 2; recommendations создавалась внутри
-    # транзакции, но `with conn:` сделал rollback при exception.
     assert _user_version(cfg.db_path) == 2
     assert "recommendations" not in _tables(cfg.db_path)
     assert "recommendation_persons" not in _tables(cfg.db_path)
 
 
 # ---------------------------------------------------------------------------
-# Legacy v1 → v2 sanity (covered by chained migration above, but keep explicit)
+# Legacy v1 → v2 sanity (covered by chained migration, kept explicit)
 # ---------------------------------------------------------------------------
 
 
-def test_v1_to_v2_item_type_defaults_to_news(cfg: Config) -> None:
-    """Существующие v1-строки получают item_type='news' после v2 миграции."""
+def test_v1_to_v2_then_v4_no_item_type_column(cfg: Config) -> None:
+    """v1 строки выживают через v1→v2 (item_type='news' default) → v4
+    (item_type column удалена; rows со старым item_type='news' остаются в news,
+    rows с item_type='recommendation' уехали бы в recommendations — в данном
+    fixture'е таких нет)."""
     _create_v1_db(cfg.db_path)
     db.init_db(cfg)
+    assert _user_version(cfg.db_path) == 4
+    assert "item_type" not in _columns(cfg.db_path, "news")
     conn = sqlite3.connect(cfg.db_path)
     try:
-        item_types = [row[0] for row in conn.execute("SELECT item_type FROM news")]
+        headlines = [row[0] for row in conn.execute("SELECT headline FROM news")]
     finally:
         conn.close()
-    assert all(it == "news" for it in item_types)
+    assert headlines == ["Old news"]

@@ -42,7 +42,7 @@ from src.config import Config
 
 log = logging.getLogger(__name__)
 
-XLSX_COLUMNS_NEWS = ["date", "headline", "persons", "mood", "item_type"]
+XLSX_COLUMNS_NEWS = ["date", "headline", "persons", "mood"]
 # Recommendations sheet расширен структурными полями (multipliers_json как plain text)
 XLSX_COLUMNS_RECS = [
     "date", "headline", "persons", "mood", "source",
@@ -138,33 +138,44 @@ def _report_company(
     affiliate_dir.mkdir(parents=True, exist_ok=True)
     news_list_dir.mkdir(parents=True, exist_ok=True)
 
-    # UNION ALL: news (включая finam-recs через item_type) + recommendations.
-    # Deterministic tie-break: published_at, _src_table, source_code, url
-    # (codex 06 P1.3 — без него nn нестабилен при коллизии timestamp'ов).
-    # Новые структурные поля (target_price, ...) у news всегда NULL.
-    rows = list(conn.execute(
-        """
-        SELECT n.id AS id, n.url AS url, n.headline AS headline, n.body AS body,
-               n.published_at AS published_at, n.mood AS mood, n.mood_reason AS mood_reason,
-               n.item_type AS item_type, s.code AS source_code,
-               NULL AS target_price, NULL AS recommendation_action,
-               NULL AS potential_pct, NULL AS multipliers_json,
-               'news' AS _src_table
-        FROM news n JOIN sources s ON s.id = n.source_id
-        WHERE n.company_id = :cid AND n.status = 'analyzed'
-        UNION ALL
-        SELECT r.id AS id, r.url AS url, r.headline AS headline, r.body AS body,
-               r.published_at AS published_at, r.mood AS mood, r.mood_reason AS mood_reason,
-               'recommendation' AS item_type, s.code AS source_code,
-               r.target_price AS target_price, r.recommendation_action AS recommendation_action,
-               r.potential_pct AS potential_pct, r.multipliers_json AS multipliers_json,
-               'recommendations' AS _src_table
-        FROM recommendations r JOIN sources s ON s.id = r.source_id
-        WHERE r.company_id = :cid AND r.status = 'analyzed'
-        ORDER BY published_at ASC, _src_table ASC, source_code ASC, url ASC
-        """,
-        {"cid": company_id},
-    ))
+    # После δ-completion (task 08): два независимых SELECT, без UNION.
+    # news table содержит только настоящие новости; рекомендации все живут в
+    # recommendations table. _src_table добавляется в Python для unified loop.
+    news_rows = [
+        dict(r, _src_table="news",
+             target_price=None, recommendation_action=None,
+             potential_pct=None, multipliers_json=None)
+        for r in conn.execute(
+            """
+            SELECT n.id AS id, n.url AS url, n.headline AS headline, n.body AS body,
+                   n.published_at AS published_at, n.mood AS mood,
+                   n.mood_reason AS mood_reason, s.code AS source_code
+            FROM news n JOIN sources s ON s.id = n.source_id
+            WHERE n.company_id = ? AND n.status = 'analyzed'
+            ORDER BY n.published_at ASC, s.code ASC, n.url ASC
+            """,
+            (company_id,),
+        )
+    ]
+    rec_rows_raw = [
+        dict(r, _src_table="recommendations")
+        for r in conn.execute(
+            """
+            SELECT r.id AS id, r.url AS url, r.headline AS headline, r.body AS body,
+                   r.published_at AS published_at, r.mood AS mood,
+                   r.mood_reason AS mood_reason, s.code AS source_code,
+                   r.target_price AS target_price,
+                   r.recommendation_action AS recommendation_action,
+                   r.potential_pct AS potential_pct,
+                   r.multipliers_json AS multipliers_json
+            FROM recommendations r JOIN sources s ON s.id = r.source_id
+            WHERE r.company_id = ? AND r.status = 'analyzed'
+            ORDER BY r.published_at ASC, s.code ASC, r.url ASC
+            """,
+            (company_id,),
+        )
+    ]
+    rows = news_rows + rec_rows_raw
 
     md_files = 0
     news_xlsx_rows: list[dict] = []
@@ -176,11 +187,9 @@ def _report_company(
         pub_utc = _parse_utc(row["published_at"])
         pub_local = pub_utc.astimezone(tz)
         date_key = pub_local.strftime("%Y_%m_%d")
-        item_type = row["item_type"] or "news"
-        # Route к нужной папке: 'news' если item_type='news', иначе 'recommendations'.
-        # Покрывает оба источника recs: legacy news.item_type='recommendation' (finam)
-        # и новую таблицу recommendations.
-        folder = "news" if item_type == "news" else "recommendations"
+        # После δ-completion: folder напрямую = _src_table. Все рекомендации
+        # живут в recommendations table; news table — только настоящие новости.
+        folder = row["_src_table"]
         day_counter[(folder, date_key)] += 1
         nn = day_counter[(folder, date_key)]
 
@@ -210,6 +219,9 @@ def _report_company(
             "potential_pct": row["potential_pct"],
             "multipliers_json": row["multipliers_json"],
         }
+        # item_type для frontmatter теперь derives из folder (backward-compat
+        # consumers, читающие старый ключ). Сама колонка в БД удалена.
+        item_type_for_frontmatter = "news" if folder == "news" else "recommendation"
         md_path = _write_md(
             target_root, pub_local, nn,
             url=row["url"],
@@ -219,7 +231,7 @@ def _report_company(
             mood_reason=row["mood_reason"] or "",
             source_code=row["source_code"],
             persons=persons,
-            item_type=item_type,
+            item_type=item_type_for_frontmatter,
             extras=extras,
         )
         if md_path:
@@ -234,7 +246,6 @@ def _report_company(
                 "headline": headline_for_xlsx,
                 "persons": persons_str,
                 "mood": row["mood"],
-                "item_type": item_type,
             })
         else:
             rec_xlsx_rows.append({
@@ -327,8 +338,9 @@ def _write_persons_csv(
     path: Path,
 ) -> int:
     # CTE c UNION ALL — упоминания персон в news и в recommendations считаются
-    # вместе. После γ-completion (когда finam-recs мигрируют) CTE сократится
-    # до single source.
+    # вместе. После δ-completion (task 08) обе junction-таблицы продолжают
+    # существовать — персона может быть упомянута и в новости, и в
+    # рекомендации; UNION остаётся естественным.
     sql = """
         WITH all_mentions AS (
             SELECT np.person_id AS person_id, n.mood AS mood
@@ -383,10 +395,10 @@ def _write_xlsx_atomic(
     """Write two-sheet workbook (news + recommendations) to ``path`` via temp.
     Return False if the final replace fails because Excel has the file open.
 
-    Behavior change vs v2: первый лист 'news' содержит только news.item_type='news'
-    (раньше — все строки включая finam-recs). Recommendations теперь на втором
-    листе с дополнительными колонками target_price/recommendation_action/etc.
-    Документировано в commit message + spec 06 P2.5.
+    После δ-completion (task 08): news лист содержит ТОЛЬКО строки из таблицы
+    news (рекомендации все мигрировали в отдельную таблицу). Колонка item_type
+    из news header удалена — все строки на news листе == news по definition.
+    Recommendations лист с прежними структурными колонками.
     """
     # Legacy single-arg path (используется test_reporter.py существующими тестами)
     if rows is not None and news_rows is None and rec_rows is None:

@@ -141,16 +141,17 @@ trees перед regen so file numbering is stable.
 - **Person frequencies are NEVER stored** — they're computed by SQL agg in
   `reporter._write_persons_csv` через CTE `all_mentions` (UNION над обоими
   junction-источниками) против `mood` analyzed-строк.
-- **News vs recommendations — две отдельные таблицы (v3, задача 06).**
-  `news` — пресс-релизы (x5_ir) и смешанная лента (finam, item_type='news'|'recommendation').
+- **News vs recommendations — две отдельные таблицы (v3, задача 06; δ-completion v4, задача 08).**
+  `news` — пресс-релизы (x5_ir) и новости (finam без рекомендаций).
   `recommendations` — отдельная таблица со структурными полями (`target_price`,
   `recommendation_action`, `potential_pct`, `multipliers_json`); туда пишут
-  только recommendation-only источники (lmsic, задача 07).
+  recommendation-only источники (lmsic) **и** finam-рекомендации после
+  per-item dispatch в analyzer'е (когда LLM классифицирует item как
+  recommendation). Колонка `news.item_type` удалена в δ-completion (v4).
 - **`Source.item_destination` enum** управляет диспатчем в `fetcher._insert`:
-  `NEWS` (default — x5_ir/finam) или `RECOMMENDATIONS` (lmsic).
-  finam **сознательно** оставлен на `NEWS` со смешанным `item_type` —
-  это γ-стратегия из spec 06 (см. `TODOS.md → δ-completion` про устранение
-  дуального read-path в будущем).
+  `NEWS` (default — x5_ir/finam) или `RECOMMENDATIONS` (lmsic). Для finam
+  диспатч в recommendations происходит на стадии **analyzer'а** (per-item
+  через `_dispatch_news_to_recommendations`, атомарно SAVEPOINT'ом).
 - **Cloud mirror is opt-in via `SUPABASE_DB_URL` in `.env`**. Absent → `cycle`
   silently skips push. Present → push runs after reporter; any psycopg/network
   error is logged at WARNING, cycle exits 0. The cloud copy is one-way,
@@ -318,12 +319,13 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   Reads `config.yaml` + `.env`. `PROJECT_ROOT` exported here as the canonical
   filesystem anchor — never hardcode paths elsewhere.
 - **`db.py`** — SQLite schema (`SCHEMA_SQL`), `init_db`, `ensure_migrated`,
-  `connect`. Migration uses `PRAGMA user_version` (currently **v3**; v1→v2
+  `connect`. Migration uses `PRAGMA user_version` (currently **v4**; v1→v2
   added `news.item_type`; v2→v3 добавил таблицы `recommendations` +
-  `recommendation_persons`). `_migrate_to_v3` транзакционная через
-  `SAVEPOINT v3_migration` — `with conn:` не работает для DDL в Python
-  sqlite3 legacy mode. `status_counts` возвращает UNION над обеими таблицами
-  с колонкой `kind`.
+  `recommendation_persons`; v3→v4 δ-completion перенёс finam-recs из
+  news.item_type='recommendation' в recommendations table и удалил колонку
+  через rebuild). Все миграции транзакционные через `SAVEPOINT` —
+  `with conn:` не работает для DDL в Python sqlite3 legacy mode.
+  `status_counts` возвращает UNION над обеими таблицами с колонкой `kind`.
 - **`models.py`** — `Company`, `Source`, `NewsItem`, `Recommendation`, `Person`
   dataclasses (lightweight read models). NOT ORM-mapped; SQLite rows are
   plain dicts via `sqlite3.Row`.
@@ -333,9 +335,15 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   два helper'а `_insert_into_news` / `_insert_into_recommendations`
   с `INSERT OR IGNORE`.
 - **`analyzer.py`** — LLM analysis stage. Два независимых path'а:
-  `_analyze_news` (с `SYSTEM_PROMPT_NEWS`, парсит item_type, UPDATE news +
-  INSERT news_persons) и `_analyze_recommendation` (с `SYSTEM_PROMPT_RECOMMENDATION` —
-  урезанный, без item_type, UPDATE recommendations + INSERT recommendation_persons).
+  `_analyze_news` (с `SYSTEM_PROMPT_NEWS`, парсит item_type; для
+  `item_type='news'` UPDATE news + INSERT news_persons; для
+  `item_type='recommendation'` **per-item dispatch** через
+  `_dispatch_news_to_recommendations` — атомарный SAVEPOINT перенос
+  news-row → recommendations table + junction news_persons →
+  recommendation_persons + DELETE из news; UPSERT по `(source_id, url)`
+  для повторных анализов) и `_analyze_recommendation` (с
+  `SYSTEM_PROMPT_RECOMMENDATION` — урезанный, без item_type,
+  UPDATE recommendations + INSERT recommendation_persons).
   Два error-marker'а (`_mark_news_error`, `_mark_recommendation_error`).
   `analyze_all` — два прохода последовательно; global config error на news-pass
   прерывает batch до recs-pass; на recs-pass — news уже закоммичены.
@@ -345,13 +353,13 @@ plurality is real (`sources/`, `cloud_sync/`). Cross-cutting helpers
   state, no network.
 - **`reporter.py`** — generates Obsidian MD + `data.xlsx` + `persons.csv`
   from SQLite. Wipes `output/<COMPANY>/{news,recommendations}/` перед regen
-  для deterministic file numbering. Read-query — UNION ALL над
-  `news WHERE item_type='recommendation'` + `recommendations` с tie-break
-  `ORDER BY published_at, _src_table, source_code, url`. `data.xlsx` теперь
-  с **двумя листами** (`news` — только item_type='news'; `recommendations` —
-  UNION со структурными колонками). YAML frontmatter не содержит ключей
-  для `NULL` значений (target_price etc отсутствуют у legacy finam-recs).
-  Timezone UTC → Europe/Moscow happens here.
+  для deterministic file numbering. После δ-completion (v4): два независимых
+  SELECT (news + recommendations), без UNION; склейка в Python с
+  `_src_table` (folder routing). `data.xlsx` с **двумя листами**:
+  `news` (только настоящие новости из news table; без колонки item_type)
+  и `recommendations` (все рекомендации со структурными колонками).
+  YAML frontmatter не содержит ключей для `NULL` значений (target_price
+  etc отсутствуют у legacy finam-recs). Timezone UTC → Europe/Moscow happens here.
 - **`text_cleanup.py`** — `clean_text()` and `sanitize_inline_code()`.
   Shared utilities for normalising news text downstream of fetch (used by
   fetcher/analyzer/reporter). **Different from** `_clean_text` inside each

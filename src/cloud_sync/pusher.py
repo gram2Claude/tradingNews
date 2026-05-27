@@ -197,10 +197,11 @@ def _push_news(
     cur: psycopg.Cursor,
     company: str | None,
 ) -> int:
+    # δ-completion (task 08): item_type из news удалён.
     sql = (
         "SELECT s.code AS source_code, n.url, c.name AS company_name, "
         "n.headline, n.body, n.published_at, n.fetched_at, "
-        "n.mood, n.mood_reason, n.item_type, n.status, "
+        "n.mood, n.mood_reason, n.status, "
         "n.error_msg, n.retry_count, n.tokens_used "
         "FROM news n "
         "JOIN companies c ON c.id = n.company_id "
@@ -214,7 +215,7 @@ def _push_news(
         (
             r["source_code"], r["url"], r["company_name"], r["headline"], r["body"],
             r["published_at"], r["fetched_at"], r["mood"], r["mood_reason"],
-            r["item_type"], r["status"], r["error_msg"], r["retry_count"],
+            r["status"], r["error_msg"], r["retry_count"],
             r["tokens_used"],
         )
         for r in src.execute(sql, params)
@@ -224,14 +225,14 @@ def _push_news(
     cur.executemany(
         "INSERT INTO trading_news.news "
         "(source_code, url, company_name, headline, body, published_at, fetched_at, "
-        " mood, mood_reason, item_type, status, error_msg, retry_count, tokens_used) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        " mood, mood_reason, status, error_msg, retry_count, tokens_used) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (source_code, url) DO UPDATE SET "
         "company_name = EXCLUDED.company_name, "
         "headline = EXCLUDED.headline, body = EXCLUDED.body, "
         "published_at = EXCLUDED.published_at, fetched_at = EXCLUDED.fetched_at, "
         "mood = EXCLUDED.mood, mood_reason = EXCLUDED.mood_reason, "
-        "item_type = EXCLUDED.item_type, status = EXCLUDED.status, "
+        "status = EXCLUDED.status, "
         "error_msg = EXCLUDED.error_msg, retry_count = EXCLUDED.retry_count, "
         "tokens_used = EXCLUDED.tokens_used",
         rows,

@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS trading_news.persons (
     PRIMARY KEY (company_name, full_name)
 );
 
+-- v2 (task 08, δ-completion): колонка item_type удалена. Рекомендации
+-- теперь живут только в trading_news.recommendations.
+-- На live Postgres миграция требует ручного: `ALTER TABLE trading_news.news
+-- DROP COLUMN IF EXISTS item_type;` (см. README cloud-section).
 CREATE TABLE IF NOT EXISTS trading_news.news (
     source_code   TEXT NOT NULL REFERENCES trading_news.sources(code) ON DELETE CASCADE,
     url           TEXT NOT NULL,
@@ -39,8 +43,6 @@ CREATE TABLE IF NOT EXISTS trading_news.news (
     fetched_at    TIMESTAMPTZ,
     mood          TEXT CHECK (mood IS NULL OR mood IN ('pos','neutral','neg')),
     mood_reason   TEXT,
-    item_type     TEXT NOT NULL DEFAULT 'news'
-                  CHECK (item_type IN ('news','recommendation')),
     status        TEXT NOT NULL DEFAULT 'new'
                   CHECK (status IN ('new','analyzed','error')),
     error_msg     TEXT,
@@ -66,9 +68,10 @@ CREATE TABLE IF NOT EXISTS trading_news.news_persons (
         REFERENCES trading_news.persons (company_name, full_name) ON DELETE CASCADE
 );
 
--- v3 (task 06): отдельная таблица recommendations + junction.
--- Стратегия γ: finam-recs остаются в news.item_type='recommendation';
--- recommendation-only источники (lmsic в задаче 07) пишут сюда.
+-- v3 (task 06) + δ-completion (task 08): все рекомендации в одной таблице.
+-- Recommendation-only источники (lmsic) пишут сюда напрямую через fetcher
+-- dispatch. Mixed-stream источники (finam) — через analyzer per-item
+-- dispatch когда LLM классифицирует item как recommendation.
 CREATE TABLE IF NOT EXISTS trading_news.recommendations (
     source_code   TEXT NOT NULL REFERENCES trading_news.sources(code) ON DELETE CASCADE,
     url           TEXT NOT NULL,
