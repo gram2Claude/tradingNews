@@ -6,33 +6,45 @@ Issues deferred from reviews — not blocking current ship, but worth tracking.
 
 ## Open
 
-### δ-completion: устранить дуальный read-path для recommendations
-*Источник: spec/plan 06 `recommendations_split` (γ-стратегия, осознанный техдолг).*
-*Открыто: 2026-05-25 (после merge PR #4).*
-
-После задачи 06 рекомендации хранятся в двух источниках:
-- `news WHERE item_type='recommendation'` — legacy finam-recs (существующие данные)
-- `recommendations` — новая таблица, заполняется recommendation-only источниками (lmsic из задачи 07)
-
-Reporter, persons.csv, data.xlsx делают UNION над обоими. См.
-`02_plans/06_claude_recommendations_split_plan.md` секция «Locations to
-remember during γ» — там перечислены все места.
-
-**Scope δ-completion (~1 день):**
-- Migration v3 → v4: `INSERT INTO recommendations SELECT ... FROM news WHERE item_type='recommendation'; DELETE FROM news WHERE item_type='recommendation'; ALTER TABLE news DROP COLUMN item_type;`
-- analyzer: убрать SYSTEM_PROMPT_NEWS секцию про item_type классификацию (либо сделать per-item dispatcher если finam останется mixed-stream)
-- reporter: UNION → single SELECT FROM recommendations
-- persons.csv: убрать UNION в CTE
-- data.xlsx: больше нет смешанной семантики
-
-**Trigger:** finam recommendation accuracy становится бизнес-критичным,
-ИЛИ появляется второй mixed-stream источник (где LLM-классификация
-item_type снова нужна), ИЛИ разработчик устал поддерживать дуальный
-read-path при правках reporter'а.
+(нет открытых пунктов)
 
 ---
 
 ## Done
+
+### δ-completion: устранение дуального read-path для recommendations (задача 08)
+*Источник: spec/plan 06 `recommendations_split` (γ-стратегия, осознанный техдолг).*
+*Открыто: 2026-05-25 (после merge PR #4) / Закрыто: 2026-05-25.*
+
+Реализовано:
+- Migration v3 → v4 в `_migrate_to_v4`: INSERT INTO recommendations SELECT
+  FROM news WHERE item_type='recommendation' (с NULL structural fields);
+  миграция junction `news_persons` → `recommendation_persons`; DELETE
+  мигрированных rows; SQLite-rebuild news table без колонки item_type
+  (CREATE news_new + INSERT + DROP + RENAME — обход отсутствия DROP
+  COLUMN в SQLite < 3.35). Атомарно через SAVEPOINT.
+- analyzer **per-item dispatch**: SYSTEM_PROMPT_NEWS продолжает
+  классифицировать item_type, но при `item_type='recommendation'` строка
+  переезжает в recommendations через `_dispatch_news_to_recommendations`
+  (атомарно SAVEPOINT, UPSERT по `(source_id, url)` для повторных
+  анализов). Persons-junction следует за строкой.
+- reporter: убран UNION ALL, два независимых SELECT (news + recommendations),
+  склейка в Python. `_src_table` derived в Python (не из SQL).
+- XLSX news header: убрана колонка `item_type` (XLSX_COLUMNS_NEWS теперь
+  `[date, headline, persons, mood]`).
+- `persons.csv` CTE с UNION ALL остаётся — junctions всё ещё две таблицы.
+- Postgres schema.sql: убран `item_type` из `trading_news.news`. На live
+  Postgres требует ручного `ALTER TABLE trading_news.news DROP COLUMN
+  IF EXISTS item_type` либо `python -m src init-cloud-db` (idempotent CREATE
+  IF NOT EXISTS не дроп'ает существующие колонки).
+- pusher.py: SELECT и INSERT для news без item_type.
+
+Тесты: 242 passed (217 baseline + 25 новых/обновлённых на δ-completion).
+Live migration на проде: 2 finam-recs мигрировали из news (21→19) в
+recommendations (1→3), user_version=3→4, колонка item_type удалена. Backup
+`data/db.sqlite.before_v4` сохранён.
+
+### RBC + e_disclosure окончательно архивированы (задача 08)
 
 ### init-db не синхронизирует `sources.enabled` с конфигом — STALE
 *Источник: `work_directory/04_reviews/02_claude_rbc_news_rew.md` P3 #4 (2026-05-21).*

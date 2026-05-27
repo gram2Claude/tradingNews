@@ -37,14 +37,42 @@ def cfg(tmp_path: Path) -> Config:
 
 def _insert_news(conn, *, headline, body, mood, published_utc, persons_full_names=(),
                  item_type="news", mood_reason=None):
+    """Dispatch helper по item_type:
+    - 'news' → INSERT INTO news (news_persons junction)
+    - 'recommendation' → INSERT INTO recommendations (recommendation_persons junction)
+
+    После δ-completion (task 08): news table не имеет колонки item_type. Помощник
+    сохраняет старый API но routes в нужную таблицу.
+    """
     cid = conn.execute("SELECT id FROM companies WHERE name='X5'").fetchone()["id"]
     sid = conn.execute("SELECT id FROM sources WHERE code='x5_ir'").fetchone()["id"]
     reason = mood_reason if mood_reason is not None else f"reason for {mood}"
+
+    if item_type == "recommendation":
+        cur = conn.execute(
+            "INSERT INTO recommendations "
+            "(company_id, source_id, url, headline, body, published_at, "
+            " mood, mood_reason, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (cid, sid, f"https://x.x/{headline[:30]}", headline, body,
+             published_utc.isoformat(), mood, reason, "analyzed"),
+        )
+        rid = cur.lastrowid
+        for name in persons_full_names:
+            pid = conn.execute(
+                "SELECT id FROM persons WHERE full_name = ?", (name,)
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO recommendation_persons "
+                "(recommendation_id, person_id) VALUES (?, ?)",
+                (rid, pid),
+            )
+        return rid
+
     cur = conn.execute(
         "INSERT INTO news (company_id, source_id, url, headline, body, "
-        "published_at, mood, mood_reason, item_type, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "published_at, mood, mood_reason, status) VALUES (?,?,?,?,?,?,?,?,?)",
         (cid, sid, f"https://x.x/{headline[:30]}", headline, body,
-         published_utc.isoformat(), mood, reason, item_type, "analyzed"),
+         published_utc.isoformat(), mood, reason, "analyzed"),
     )
     nid = cur.lastrowid
     for name in persons_full_names:
@@ -98,7 +126,9 @@ def test_report_does_not_create_empty_recommendations_folder(cfg: Config) -> Non
 
 
 def test_report_wipes_both_folders_on_regen(cfg: Config) -> None:
-    """Reclassified item (news → recommendation) — старый MD в news/ удаляется."""
+    """После реклассификации (per-item dispatch в analyzer): новость переезжает
+    из news → recommendations. Reporter wipe чистит обе папки → старый MD в news/
+    удаляется, новый появляется в recommendations/."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
     nid = _insert_news(conn, headline="Reclassify me", body="Body",
@@ -110,9 +140,18 @@ def test_report_wipes_both_folders_on_regen(cfg: Config) -> None:
     news_md_v1 = list((cfg.output_root / "X5" / "news").rglob("*.md"))
     assert len(news_md_v1) == 1
 
-    # Reclassify: news → recommendation
+    # Имитируем per-item dispatch (analyzer переклассифицировал news → rec):
+    # копируем news-row → recommendations, удаляем из news
     conn = db.connect(cfg.db_path)
-    conn.execute("UPDATE news SET item_type='recommendation' WHERE id=?", (nid,))
+    conn.execute(
+        "INSERT INTO recommendations "
+        "(company_id, source_id, url, headline, body, published_at, "
+        " mood, mood_reason, status) "
+        "SELECT company_id, source_id, url, headline, body, published_at, "
+        "       mood, mood_reason, 'analyzed' FROM news WHERE id=?",
+        (nid,),
+    )
+    conn.execute("DELETE FROM news WHERE id=?", (nid,))
     conn.commit()
     conn.close()
     reporter.report_all(cfg, "X5")
@@ -123,13 +162,13 @@ def test_report_wipes_both_folders_on_regen(cfg: Config) -> None:
 
 
 def test_xlsx_has_two_sheets_with_recs_on_second(cfg: Config) -> None:
-    """Excel workbook has two sheets: 'news' (только item_type='news') и
-    'recommendations' (включает finam-recs из news.item_type='recommendation' +
-    отдельную таблицу recommendations). Behavior change в задаче 06 — см.
-    spec P2.5."""
+    """Excel workbook has two sheets: 'news' (только настоящие новости из news
+    table) и 'recommendations' (все рекомендации из recommendations table —
+    включает legacy finam-recs мигрировавшие сюда + recommendation-only sources).
+    После δ-completion (task 08): item_type колонка убрана из news sheet header."""
     db.init_db(cfg)
     conn = db.connect(cfg.db_path)
-    # finam-style recommendation попадёт в news с item_type='recommendation'
+    # После δ-completion: рекомендация пишется напрямую в recommendations
     _insert_news(conn, headline="A", body="Body",
                  mood="pos", published_utc=datetime(2026, 5, 19, tzinfo=timezone.utc),
                  item_type="recommendation")
@@ -140,20 +179,20 @@ def test_xlsx_has_two_sheets_with_recs_on_second(cfg: Config) -> None:
     # Два листа в порядке news → recommendations
     assert wb.sheetnames == ["news", "recommendations"]
 
-    # Sheet news — только заголовок, никаких finam-recs строк
+    # Sheet news — только заголовок (item_type column удалён в δ-completion)
     ws_news = wb["news"]
     news_headers = [ws_news.cell(1, c).value for c in range(1, ws_news.max_column + 1)]
-    assert news_headers == ["date", "headline", "persons", "mood", "item_type"]
+    assert news_headers == ["date", "headline", "persons", "mood"]
     assert ws_news.max_row == 1  # только header, нет данных
 
-    # Sheet recommendations содержит finam-rec строку
+    # Sheet recommendations содержит rec строку
     ws_recs = wb["recommendations"]
     rec_headers = [ws_recs.cell(1, c).value for c in range(1, ws_recs.max_column + 1)]
     assert rec_headers == [
         "date", "headline", "persons", "mood", "source",
         "target_price", "recommendation_action", "potential_pct", "multipliers",
     ]
-    # finam-style рекомендация — target_price etc остаются NULL (legacy путь)
+    # Recommendation вставлена с NULL structural fields (через тест-хелпер)
     assert ws_recs.max_row == 2
     assert ws_recs.cell(2, 2).value == "A"  # headline
     assert ws_recs.cell(2, 4).value == "pos"  # mood

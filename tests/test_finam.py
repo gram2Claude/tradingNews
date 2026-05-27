@@ -246,3 +246,43 @@ def test_finam_raises_on_invalid_ticker(tmp_path: Path) -> None:
     ctx = FetchContext(cfg.companies[0], cid, sid, cfg.db_path)
     with pytest.raises(ValueError, match=r"\[a-z0-9\]\+"):
         FinamSource(base_url="https://x.x/", context=ctx)
+
+
+def test_finam_known_urls_unions_recommendations(fetch_context: FetchContext) -> None:
+    """Regression (codex P1 на δ-completion): после per-item dispatch finam-recs
+    переезжают из news в recommendations. Dedup-запрос обязан UNION'ить обе
+    таблицы, иначе re-fetch + re-LLM-analyze каждый cycle.
+    """
+    sid = fetch_context.source_id
+    cid = fetch_context.company_id
+    url_news = "https://www.finam.ru/publications/item/-20260501-1000/"
+    url_rec = "https://www.finam.ru/publications/item/-20260502-1100/"
+
+    with sqlite3.connect(fetch_context.db_path) as conn:
+        conn.execute(
+            "INSERT INTO news (company_id, source_id, url, headline, body, "
+            "published_at, status) VALUES (?, ?, ?, 'n', 'b', "
+            "'2026-05-01T07:00:00+00:00', 'analyzed')",
+            (cid, sid, url_news),
+        )
+        conn.execute(
+            "INSERT INTO recommendations (company_id, source_id, url, headline, "
+            "body, published_at, status) VALUES (?, ?, ?, 'r', 'b', "
+            "'2026-05-02T08:00:00+00:00', 'analyzed')",
+            (cid, sid, url_rec),
+        )
+        # Этот SQL должен совпадать с тем, что использует FinamSource.fetch().
+        known = {
+            row[0]
+            for row in conn.execute(
+                "SELECT url FROM news WHERE source_id=? "
+                "UNION SELECT url FROM recommendations WHERE source_id=?",
+                (sid, sid),
+            )
+        }
+
+    assert url_news in known
+    assert url_rec in known, (
+        "finam dedup игнорирует recommendations — URL после dispatch'а будет "
+        "переанализирован каждый cycle (LLM-tokens leak)"
+    )

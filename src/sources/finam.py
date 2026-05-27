@@ -248,13 +248,17 @@ class FinamSource(PlaywrightSource):
         # Verify тут НЕ делаем: на главной finam нет publication-селектора.
         self._goto(self.base_url, sleep_s=WARMUP_SLEEP_S)
 
-        # 2. Bulk-load known URLs (codex 03 P1.4)
+        # 2. Bulk-load known URLs (codex 03 P1.4).
+        # δ-completion (task 08): после per-item dispatch finam-recs живут в
+        # таблице recommendations, не в news. Без UNION одни и те же URL'ы
+        # переанализировались каждый cycle (LLM-tokens leak).
         with sqlite3.connect(self.context.db_path) as conn:
             known_urls = {
                 row[0]
                 for row in conn.execute(
-                    "SELECT url FROM news WHERE source_id=?",
-                    (self.context.source_id,),
+                    "SELECT url FROM news WHERE source_id=? "
+                    "UNION SELECT url FROM recommendations WHERE source_id=?",
+                    (self.context.source_id, self.context.source_id),
                 )
             }
         log.info("finam: %d known URLs pre-loaded for dedup", len(known_urls))

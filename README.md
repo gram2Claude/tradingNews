@@ -171,6 +171,27 @@ NBSP, control-символы; сжимает whitespace) — в БД попад�
   Практическое следствие: правки делай локально и пушь. Если хочешь чистое
   зеркало без legacy-строк — пересоздать схему через `init-cloud-db` после
   ручного `DROP SCHEMA trading_news CASCADE` в Supabase SQL editor.
+- **δ-completion (задача 08): колонка `trading_news.news.item_type` удалена
+  из schema.sql.** На уже существующем Postgres `init-cloud-db` НЕ дроп'ает
+  её (CREATE TABLE IF NOT EXISTS — no-op для существующих таблиц). Если
+  хочешь обнулить рассинхрон — `ALTER TABLE trading_news.news DROP COLUMN
+  IF EXISTS item_type` руками в Supabase SQL editor. Иначе колонка останется,
+  но pusher её больше не заполняет (NULL'ы в новых строках — допустимо).
+
+  **Residual finam-recs в облачном `news` (codex P2 на δ-completion):**
+  если до v4 локальная БД уже пушила finam-recs (с тогдашним
+  `item_type='recommendation'`), эти строки навсегда остались в
+  `trading_news.news`. После миграции SQLite те же URL'ы теперь в
+  `recommendations` table и push'ятся в `trading_news.recommendations` —
+  получается дубль в дашборде (одна URL в обеих таблицах). Pusher не
+  удаляет, см. additive-only выше. Одноразовый SQL в Supabase editor:
+  ```sql
+  DELETE FROM trading_news.news
+  WHERE (source_code, url) IN (
+      SELECT source_code, url FROM trading_news.recommendations
+  );
+  ```
+  Безопасен повторно (идемпотент): удаляет только пересечение ключей.
 - Пароль БД и connection string хранятся **только в `.env`** (gitignored).
   Никогда не коммить `.env`. Connection string в логах автоматически маскируется
   (пароль → `***`).
