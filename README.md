@@ -68,7 +68,7 @@ python -m src cycle
    settings**: поставь галочку **Repeat task every: 1 hour** for a duration of
    **1 day**
 5. **Action:** Start a program → **Program/script:** полный путь к `run.bat`
-   (например `C:\Users\Oleg\Desktop\Alex\03_claude\06_trading_news\run.bat`)
+   (например `C:\Users\Oleg\Desktop\Alex\03_claude\01_wexus_space\06_trading_news\run.bat`)
 6. **Start in (optional):** путь к корню проекта (`C:\Users\...\06_trading_news`)
 7. **Settings:** «Run whether user is logged on or not», «Run with highest
    privileges» по желанию.
